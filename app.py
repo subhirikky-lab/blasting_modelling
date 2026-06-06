@@ -1,7 +1,7 @@
 # =====================================================================
 # Prediksi Ground Vibration (g) Pit 3
 # Aplikasi web (Streamlit) dari model Hybrid Monte Carlo + Weighted Factor
-# + Residual Ratio + Design Value (P90) + Frekuensi-Resonansi.
+# + Residual Ratio + Design Value (P90) + Diagnostik Resonansi.
 # Jalankan lokal :  streamlit run app.py
 # =====================================================================
 
@@ -252,34 +252,54 @@ def importance_metrics(cal, inp_row, mean_wf):
     return dict(sobol=sobol, levels=levels, g_levels=g_levels)
 
 
-def calibrate_frequency(df):
+def frequency_diagnostics(df):
+    """DIAGNOSTIK RESONANSI MURNI (bukan prediktor).
+    Temuan data Pit 3: freq vs scale-distance R2 ~ 0.002 (nol) -> frekuensi
+    TIDAK valid diprediksi dari SD. Frekuensi dominan diposisikan sebagai
+    AUDIT PITA BAHAYA dari 19 event aktual (Floyd 2008; zona resonansi lereng).
+    """
     if COL_FREQ not in df.columns:
         return None
     sub = df.dropna(subset=[COL_FREQ])
     sub = sub[sub[COL_FREQ] > 0]
-    if len(sub) < 5:
+    if len(sub) < 1:
         return None
-    ln_f = np.log(sub[COL_FREQ].values)
-    ln_sd = np.log(sub["scale_distance"].values)
-    slope, intercept, r_val, _, _ = stats.linregress(ln_sd, ln_f)
-    return dict(fk=float(np.exp(intercept)), fn=float(slope), r2=float(r_val ** 2),
-                n=int(len(sub)), sub=sub)
+    freqs = sub[COL_FREQ].values.astype(float)
+    n = int(len(freqs))
 
+    # Pita Floyd (2008): klasifikasi respons lereng berdasar frekuensi dominan.
+    band_defs = [("Weak (3-7 Hz)", 3.0, 7.0), ("Blocky (7-15 Hz)", 7.0, 15.0),
+                 ("Strong (15-23 Hz)", 15.0, 23.0), ("Aman (>23 Hz)", 23.0, float("inf"))]
+    bands = []
+    for name, lo, hi in band_defs:
+        c = int(np.sum((freqs > lo) & (freqs <= hi)))
+        bands.append(dict(name=name, lo=lo, hi=hi, count=c,
+                          pct=100.0 * c / n if n > 0 else 0.0))
 
-def resonance_msgs(freq_hz, geo):
-    msgs = []
-    rock = GEO_TO_ROCK.get(geo)
-    if rock:
-        lo, hi = ROCK_NATURAL_FREQ[rock]
-        if freq_hz <= hi:
-            msgs.append(("warning", "RESONANSI: " + format(freq_hz, ".1f") + " Hz <= natural freq batuan '" + rock + "' (" + str(lo) + "-" + str(hi) + " Hz) -> potensi amplifikasi"))
-        else:
-            msgs.append(("ok", "OK vs batuan: " + format(freq_hz, ".1f") + " Hz di atas natural freq '" + rock + "' (" + str(lo) + "-" + str(hi) + " Hz)"))
-    if freq_hz < SLOPE_FREQ_THRESHOLD:
-        msgs.append(("warning", "SLOPE-RISK: " + format(freq_hz, ".1f") + " Hz < " + format(SLOPE_FREQ_THRESHOLD, ".0f") + " Hz (rentang paling berdampak ke lereng)"))
-    else:
-        msgs.append(("ok", "OK vs lereng: " + format(freq_hz, ".1f") + " Hz >= " + format(SLOPE_FREQ_THRESHOLD, ".0f") + " Hz"))
-    return msgs
+    n_slope = int(np.sum(freqs < SLOPE_FREQ_THRESHOLD))
+
+    # Audit resonansi per kelas geologi (pakai frekuensi event AKTUAL, bukan prediksi).
+    geo_audit = {}
+    if "geological_condt" in sub.columns:
+        for geo in sorted(str(x) for x in sub["geological_condt"].dropna().unique()):
+            g_sub = sub[sub["geological_condt"].astype(str) == geo]
+            gf = g_sub[COL_FREQ].values.astype(float)
+            if len(gf) == 0:
+                continue
+            rock = GEO_TO_ROCK.get(geo)
+            rng = ROCK_NATURAL_FREQ.get(rock) if rock else None
+            in_res = 0
+            if rng is not None:
+                in_res = int(np.sum(gf <= rng[1]))   # <= batas atas natural -> risiko amplifikasi
+            geo_audit[geo] = dict(rock=rock, rng=rng, n=int(len(gf)), in_res=in_res,
+                                  freqs=sorted(float(x) for x in gf),
+                                  fmin=float(np.min(gf)), fmax=float(np.max(gf)),
+                                  fmed=float(np.median(gf)))
+
+    return dict(n=n, freqs=sorted(float(x) for x in freqs),
+                fmin=float(np.min(freqs)), fmax=float(np.max(freqs)),
+                fmed=float(np.median(freqs)), bands=bands,
+                n_slope=n_slope, sub=sub, geo_audit=geo_audit)
 
 
 def recommend(inp, cal, mean_wf, df, target, design_lambda):
@@ -334,8 +354,8 @@ def build_model(file_bytes, method):
     mae_loo = float(np.mean([abs(a - p) for a, p in pairs]))
     csf = csf_metrics(pairs)
     dl = design_limits(pairs)
-    fcal = calibrate_frequency(df)
-    return df, cal, mean_wf, mae_loo, csf, dl, fcal
+    fdiag = frequency_diagnostics(df)
+    return df, cal, mean_wf, mae_loo, csf, dl, fdiag
 
 
 # ---------------------------------------------------------------------
@@ -347,7 +367,7 @@ if not check_password():
     st.stop()
 
 st.title("Prediksi Ground Vibration (g) Pit 3")
-st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value (P90) + Frekuensi-Resonansi")
+st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value (P90) + Diagnostik Resonansi")
 
 with st.sidebar:
     st.header("1. Data")
@@ -376,7 +396,7 @@ with st.sidebar:
 
 file_bytes = up.getvalue() if up is not None else None
 try:
-    df, cal, mean_wf, mae_loo, csf, dl, fcal = build_model(file_bytes, method)
+    df, cal, mean_wf, mae_loo, csf, dl, fdiag = build_model(file_bytes, method)
 except Exception as e:
     st.error("Gagal memproses data: " + str(e))
     st.stop()
@@ -447,7 +467,7 @@ else:
     st.info("Proyeksi bila saran diterapkan -> median " + format(rec["final_median"], ".5f") + ", DESIGN " + format(rec["final_design"], ".5f"))
 
 # ---- Tabs analisis ----
-tab1, tab2, tab3, tab4 = st.tabs(["Faktor (Sobol + Heatmap)", "Validasi & CSF", "Frekuensi-Resonansi", "Sensitivity Charge"])
+tab1, tab2, tab3, tab4 = st.tabs(["Faktor (Sobol + Heatmap)", "Validasi & CSF", "Diagnostik Resonansi", "Sensitivity Charge"])
 
 imp = importance_metrics(cal, inp, mean_wf)
 order = sorted(ALL_PARAMS, key=lambda p: -imp["sobol"][p])
@@ -525,21 +545,47 @@ with tab2:
     st.caption("Dipakai: P" + str(design_pct) + " metode " + design_method + " -> lambda = " + format(design_lambda, ".3f"))
 
 with tab3:
-    if fcal is None:
-        st.info("Kolom '" + COL_FREQ + "' belum ada/cukup di Excel -> analisis resonansi dilewati. "
+    if fdiag is None:
+        st.info("Kolom '" + COL_FREQ + "' belum ada di Excel -> diagnostik resonansi dilewati. "
                 "Tambahkan kolom frekuensi dominan (Hz) untuk mengaktifkan.")
     else:
-        f_pred = fcal["fk"] * inp["scale_distance"] ** (fcal["fn"])
-        st.write("Kalibrasi freq vs SD: R2 = " + format(fcal["r2"], ".3f") + " (n=" + str(fcal["n"]) + ")")
-        if fcal["r2"] < 0.3:
-            st.caption("R2 rendah -> frekuensi lemah diprediksi dari SD (konsisten literatur). Pakai sebagai INDIKASI.")
-        st.metric("Prediksi frekuensi dominan event ini", format(f_pred, ".1f") + " Hz")
-        for kind, msg in resonance_msgs(f_pred, str(inp["geological_condt"])):
-            (st.warning if kind == "warning" else st.success)(msg)
-        sub = fcal["sub"]
-        n_slope = int((sub[COL_FREQ] < SLOPE_FREQ_THRESHOLD).sum())
-        st.write("Data aktual: " + str(n_slope) + "/" + str(fcal["n"]) + " event punya freq < " + format(SLOPE_FREQ_THRESHOLD, ".0f") + " Hz (zona sensitif lereng)")
-        st.caption("Catatan: pemetaan geologi->kelas batuan & natural freq (Floyd 2008) WAJIB diverifikasi dgn uji site.")
+        st.markdown("**Diagnostik resonansi (bukan prediksi).** "
+                    "Frekuensi dominan **tidak** dapat diprediksi dari scale-distance "
+                    "(R2 ~ 0.002, praktis nol) maupun parameter desain ledakan. "
+                    "Oleh karena itu frekuensi diposisikan sebagai **audit pita bahaya** dari "
+                    + str(fdiag["n"]) + " event aktual Pit 3 - bukan sebagai output prediksi presisi.")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Frekuensi dominan - min", format(fdiag["fmin"], ".1f") + " Hz")
+        c2.metric("median", format(fdiag["fmed"], ".1f") + " Hz")
+        c3.metric("maks", format(fdiag["fmax"], ".1f") + " Hz")
+
+        st.markdown("**Distribusi pita Floyd (2008) - respons lereng berdasar frekuensi dominan:**")
+        band_rows = []
+        for b in fdiag["bands"]:
+            band_rows.append({"Pita": b["name"], "Jumlah event": b["count"],
+                              "Porsi (%)": round(b["pct"], 0)})
+        st.dataframe(pd.DataFrame(band_rows), use_container_width=True, hide_index=True)
+
+        st.warning(str(fdiag["n_slope"]) + "/" + str(fdiag["n"]) + " event berada di bawah "
+                   + format(SLOPE_FREQ_THRESHOLD, ".0f") + " Hz (zona resonansi lereng). "
+                   "Mayoritas energi getaran Pit 3 jatuh di pita yang paling berdampak ke stabilitas lereng.")
+
+        if fdiag["geo_audit"]:
+            st.markdown("**Audit resonansi per kondisi geologi (frekuensi event aktual vs natural freq batuan):**")
+            geo_rows = []
+            for geo, a in fdiag["geo_audit"].items():
+                rng_txt = (str(a["rng"][0]) + "-" + str(a["rng"][1]) + " Hz") if a["rng"] else "(tidak dipetakan)"
+                geo_rows.append({"Geologi": geo, "Kelas batuan": str(a["rock"]),
+                                 "Natural freq": rng_txt, "n event": a["n"],
+                                 "freq min-maks": format(a["fmin"], ".1f") + " - " + format(a["fmax"], ".1f"),
+                                 "Event di zona resonansi": a["in_res"]})
+            st.dataframe(pd.DataFrame(geo_rows), use_container_width=True, hide_index=True)
+
+        st.caption("Catatan metodologis: frekuensi tergantung geologi, jarak, dan delay secara "
+                   "kompleks/non-linear (Lucca 2003) sehingga R2 ~ 0 terhadap SD adalah wajar dan "
+                   "sesuai literatur (Floyd 2008; Kumar 2020; Hasanipanah 2015). Pemetaan "
+                   "geologi->kelas batuan & natural freq WAJIB diverifikasi dengan uji site.")
 
 with tab4:
     st.markdown("Variasi charge (distance tetap = " + format(inp["distance_m"], ".0f") + " m)")
