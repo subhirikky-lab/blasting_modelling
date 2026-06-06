@@ -1,5 +1,5 @@
 # =====================================================================
-# BLASTWAVE WEB - Prediksi Ground Vibration (g) Pit 3
+# Prediksi Ground Vibration (g) Pit 3
 # Aplikasi web (Streamlit) dari model Hybrid Monte Carlo + Weighted Factor
 # + Residual Ratio + Design Value (P90) + Frekuensi-Resonansi.
 # Jalankan lokal :  streamlit run app.py
