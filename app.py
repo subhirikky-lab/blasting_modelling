@@ -44,6 +44,62 @@ ROCK_NATURAL_FREQ = {"weak": (3, 7), "blocky": (7, 15), "strong": (15, 23)}
 GEO_TO_ROCK = {"coal": "weak", "normal": "blocky", "Fault": "weak"}
 SLOPE_FREQ_THRESHOLD = 40.0
 
+# ---------------------------------------------------------------------
+# DATABASE INTERNAL (bawaan) - 19 event aktual Pit 3.
+# User tidak perlu upload; cukup isi parameter. Repo WAJIB Private.
+# ---------------------------------------------------------------------
+_COLS = ["Amaks (mm/s^s) Maks", "nilai_g", "charge_kg", "distance_m", "tie_up_type",
+         "wall_echelon_ms", "freeface_echelon_ms", "controll_ms", "freeface_count",
+         "geological_condt", "measuring_elevation", "row_number", "frekuensi_hz"]
+_ROWS = [
+    [258.11, 0.02631989517, 40, 270, "echelon", 109, 0, 67, 1, "normal", "higher", 3, 8.3],
+    [1049, 0.1069682307, 30, 150, "echelon", 109, 0, 176, 1, "normal", "higher", 5, 9.8],
+    [5198, 0.5300484875, 30, 80, "boxcut", 176, 176, 109, 1, "Fault", "higher", 10, 11.3],
+    [226.13, 0.02305884272, 30, 300, "echelon", 176, 0, 109, 1, "normal", "higher", 4, 4.5],
+    [387, 0.03946301744, 17, 180, "boxcut", 176, 176, 109, 2, "normal", "higher", 9, 49],
+    [258.24, 0.02633315148, 50, 285, "echelon", 109, 0, 176, 2, "coal", "higher", 5, 6.4],
+    [226.13, 0.02305884272, 55, 350, "echelon", 109, 0, 176, 2, "coal", "higher", 5, 8.3],
+    [484, 0.04935426471, 57, 324, "echelon", 0, 109, 176, 2, "coal", "higher", 5, 7.9],
+    [306.8, 0.03128489341, 60, 420, "echelon", 0, 67, 109, 1, "coal", "higher", 5, 8.1],
+    [80.65, 0.008224011258, 60, 430, "boxcut", 42, 67, 109, 2, "coal", "higher", 4, 8.6],
+    [161.42, 0.01646025911, 80, 500, "boxcut", 67, 42, 109, 0, "coal", "higher", 5, 3.8],
+    [193.7, 0.01975190305, 90, 300, "boxcut", 67, 42, 109, 3, "coal", "normal", 6, 4.2],
+    [1098, 0.1119648402, 82, 160, "boxcut", 67, 42, 109, 2, "coal", "lower", 9, 7.3],
+    [936, 0.09544543753, 82, 160, "boxcut", 67, 42, 109, 0, "normal", "normal", 9, 6.3],
+    [1195, 0.1218560875, 82, 160, "boxcut", 67, 42, 109, 0, "Fault", "higher", 9, 5.9],
+    [96.85, 0.009875951523, 51, 454, "boxcut", 67, 42, 109, 2, "Fault", "normal", 7, 14.3],
+    [323, 0.03293683368, 51, 320, "boxcut", 67, 42, 109, 2, "normal", "normal", 7, 4.9],
+    [1130, 0.1152279321, 38, 176, "echelon", 42, 0, 67, 1, "Fault", "higher", 4, 8.8],
+    [678, 0.06913675924, 38, 226, "echelon", 42, 0, 67, 1, "coal", "lower", 4, 12],
+]
+BUILTIN_DATA = [dict(zip(_COLS, r)) for r in _ROWS]
+
+
+def get_secret(key):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return None
+
+
+def check_password():
+    """Gerbang password OPSIONAL. Aktif hanya jika secret 'app_password' di-set
+    di Streamlit (Settings -> Secrets). Jika tidak di-set, app terbuka biasa."""
+    pw = get_secret("app_password")
+    if not pw:
+        return True
+    if st.session_state.get("auth_ok"):
+        return True
+    st.title("Blastwave - Login")
+    entered = st.text_input("Password", type="password")
+    if st.button("Masuk"):
+        if entered == pw:
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Password salah.")
+    return False
+
 
 # ---------------------------------------------------------------------
 # FUNGSI MODEL (mengembalikan nilai, bukan print)
@@ -266,7 +322,10 @@ def recommend(inp, cal, mean_wf, df, target, design_lambda):
 # ---------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def build_model(file_bytes, method):
-    df_raw = pd.read_excel(io.BytesIO(file_bytes))
+    if file_bytes is None:
+        df_raw = pd.DataFrame(BUILTIN_DATA)          # database internal bawaan
+    else:
+        df_raw = pd.read_excel(io.BytesIO(file_bytes))  # override admin (opsional)
     df = validate(df_raw)
     cal = calibrate(df, method)
     df = cal["df"]
@@ -283,12 +342,18 @@ def build_model(file_bytes, method):
 # UI
 # ---------------------------------------------------------------------
 st.set_page_config(page_title="Blastwave - Prediksi Getaran Pit 3", page_icon="boom", layout="wide")
+
+if not check_password():
+    st.stop()
+
 st.title("Blastwave - Prediksi Ground Vibration (g) Pit 3")
 st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value (P90) + Frekuensi-Resonansi")
 
 with st.sidebar:
-    st.header("1. Data Aktual")
-    up = st.file_uploader("Upload Excel (mis. nilai_g_pit3.xlsx)", type=["xlsx", "xls"])
+    st.header("1. Data")
+    st.caption("Aplikasi memakai database internal (bawaan). User cukup mengisi parameter di bawah.")
+    with st.expander("Admin (opsional): perbarui database"):
+        up = st.file_uploader("Upload Excel pengganti (format kolom sama)", type=["xlsx", "xls"])
     st.header("2. Pengaturan Model")
     method = st.selectbox("Metode residual ratio", ["geometric", "arithmetic"], index=0)
     g_target = st.number_input("Ambang aman g (G_TARGET)", value=0.030, step=0.005, format="%.3f")
@@ -297,17 +362,14 @@ with st.sidebar:
     use_loocv_sigma = st.checkbox("Pakai sigma LOOCV (lebih jujur)", value=True)
     n_iter = st.select_slider("Iterasi Monte Carlo", options=[2000, 5000, 10000, 20000], value=10000)
 
-if up is None:
-    st.info("Mulai dengan meng-upload file Excel data aktual di sidebar kiri. "
-            "Kolom wajib: " + ", ".join([COL_AMAKS, COL_G, COL_DIST, COL_CHG] + ALL_PARAMS) +
-            ". Kolom opsional: " + COL_FREQ + " (frekuensi dominan, untuk analisis resonansi).")
-    st.stop()
-
+file_bytes = up.getvalue() if up is not None else None
 try:
-    df, cal, mean_wf, mae_loo, csf, dl, fcal = build_model(up.getvalue(), method)
+    df, cal, mean_wf, mae_loo, csf, dl, fcal = build_model(file_bytes, method)
 except Exception as e:
-    st.error("Gagal memproses file: " + str(e))
+    st.error("Gagal memproses data: " + str(e))
     st.stop()
+st.caption("Sumber data: " + ("file upload (admin)" if up is not None else "database internal bawaan") +
+           "  |  jumlah event: " + str(len(df)))
 
 sigma_mc = dl["s_e"] if use_loocv_sigma else cal["sigma"]
 design_lambda = dl["table"][design_pct]["emp" if design_method == "empirical" else "norm"]
