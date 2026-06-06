@@ -352,8 +352,20 @@ st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value
 with st.sidebar:
     st.header("1. Data")
     st.caption("Aplikasi memakai database internal (bawaan). User cukup mengisi parameter di bawah.")
-    with st.expander("Admin (opsional): perbarui database"):
-        up = st.file_uploader("Upload Excel pengganti (format kolom sama)", type=["xlsx", "xls"])
+    up = None
+    admin_pw = get_secret("admin_password")
+    if admin_pw:
+        with st.expander("Login admin (khusus pengelola)"):
+            entered_admin = st.text_input("Password admin", type="password", key="admin_pw_input")
+            if entered_admin:
+                if entered_admin == admin_pw:
+                    st.session_state["is_admin"] = True
+                else:
+                    st.session_state["is_admin"] = False
+                    st.error("Password admin salah.")
+        if st.session_state.get("is_admin"):
+            st.success("Mode admin aktif - kamu bisa perbarui database.")
+            up = st.file_uploader("Upload Excel pengganti (format kolom sama)", type=["xlsx", "xls"])
     st.header("2. Pengaturan Model")
     method = st.selectbox("Metode residual ratio", ["geometric", "arithmetic"], index=0)
     g_target = st.number_input("Ambang aman g (G_TARGET)", value=0.030, step=0.005, format="%.3f")
