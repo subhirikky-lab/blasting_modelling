@@ -90,7 +90,7 @@ def check_password():
         return True
     if st.session_state.get("auth_ok"):
         return True
-    st.title("Blastwave - Login")
+    st.title("Login")
     entered = st.text_input("Password", type="password")
     if st.button("Masuk"):
         if entered == pw:
@@ -341,12 +341,12 @@ def build_model(file_bytes, method):
 # ---------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------
-st.set_page_config(page_title="Blastwave - Prediksi Getaran Pit 3", page_icon="boom", layout="wide")
+st.set_page_config(page_title="Prediksi Getaran Pit 3", page_icon="boom", layout="wide")
 
 if not check_password():
     st.stop()
 
-st.title("Blastwave - Prediksi Ground Vibration (g) Pit 3")
+st.title("Prediksi Ground Vibration (g) Pit 3")
 st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value (P90) + Frekuensi-Resonansi")
 
 with st.sidebar:
@@ -380,8 +380,7 @@ try:
 except Exception as e:
     st.error("Gagal memproses data: " + str(e))
     st.stop()
-st.caption("Sumber data: " + ("file upload (admin)" if up is not None else "database internal bawaan") +
-           "  |  jumlah event: " + str(len(df)))
+st.caption("Sumber data: " + ("file upload (admin)" if up is not None else "database internal bawaan"))
 
 sigma_mc = dl["s_e"] if use_loocv_sigma else cal["sigma"]
 design_lambda = dl["table"][design_pct]["emp" if design_method == "empirical" else "norm"]
