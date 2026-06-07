@@ -387,12 +387,31 @@ with st.sidebar:
             st.success("Mode admin aktif - kamu bisa perbarui database.")
             up = st.file_uploader("Upload Excel pengganti (format kolom sama)", type=["xlsx", "xls"])
     st.header("2. Pengaturan Model")
-    method = st.selectbox("Metode residual ratio", ["geometric", "arithmetic"], index=0)
-    g_target = st.number_input("Ambang aman g (G_TARGET)", value=0.030, step=0.005, format="%.3f")
-    design_pct = st.selectbox("Design percentile", [90, 95, 75], index=0)
-    design_method = st.selectbox("Metode Design Value", ["empirical", "normal"], index=0)
-    use_loocv_sigma = st.checkbox("Pakai sigma LOOCV (lebih jujur)", value=True)
-    n_iter = st.select_slider("Iterasi Monte Carlo", options=[2000, 5000, 10000, 20000], value=10000)
+    st.caption("Default di bawah sudah merupakan setelan yang DISARANKAN. "
+               "Biarkan apa adanya kecuali sedang melakukan uji sensitivitas.")
+    method = st.selectbox(
+        "Metode residual ratio", ["geometric", "arithmetic"], index=0,
+        help=("DISARANKAN: geometric. Residual ratio bersifat perkalian (lognormal), "
+              "sehingga geometric mean adalah estimator tengah yang tidak bias. "
+              "Arithmetic cenderung menggelembung ke atas karena ditarik nilai rasio besar "
+              "-> pakai hanya untuk pembanding."))
+    g_target = st.number_input("Ambang aman g (G_TARGET)", value=0.030, step=0.005, format="%.3f",
+                               help="Batas g yang dianggap aman untuk keputusan. Default 0.030.")
+    design_pct = st.selectbox(
+        "Design percentile", [90, 95, 75], index=0,
+        help=("DISARANKAN: P90. Dengan n=19 event, P90 empiris andal. "
+              "P95 hanya disokong ~1 event -> rapuh; bila perlu P95 gunakan metode 'normal'."))
+    design_method = st.selectbox(
+        "Metode Design Value", ["empirical", "normal"], index=0,
+        help=("DISARANKAN: empirical. Mengambil persentil langsung dari sebaran rasio aktual "
+              "(tanpa asumsi distribusi) -> sumber lambda yang sudah dikalibrasi. "
+              "'normal' mengasumsikan rasio lognormal (lambda = exp(mu + z*sigma)); "
+              "lebih stabil untuk ekstrapolasi persentil tinggi/cross-check."))
+    use_loocv_sigma = st.checkbox(
+        "Pakai sigma LOOCV (lebih jujur)", value=True,
+        help="DISARANKAN: aktif. Memakai sebaran error leave-one-out, bukan error in-sample yang optimistik.")
+    n_iter = st.select_slider("Iterasi Monte Carlo", options=[2000, 5000, 10000, 20000], value=10000,
+                              help="Jumlah iterasi simulasi. 10000 sudah stabil; lebih tinggi = lebih halus tapi lambat.")
 
 file_bytes = up.getvalue() if up is not None else None
 try:
@@ -543,6 +562,9 @@ with tab2:
                      "lambda normal": round(t["norm"], 2), "underpred norm (%)": round(t["under_norm"], 0)})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.caption("Dipakai: P" + str(design_pct) + " metode " + design_method + " -> lambda = " + format(design_lambda, ".3f"))
+    st.info("Panduan setelan: **geometric** (residual ratio) + **empirical P90** (Design Value) "
+            "adalah konfigurasi yang disarankan untuk keputusan. Opsi 'arithmetic' dan 'normal' "
+            "disediakan untuk uji sensitivitas / cross-check, bukan untuk produksi.")
 
 with tab3:
     if fdiag is None:
