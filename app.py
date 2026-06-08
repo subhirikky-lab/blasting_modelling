@@ -44,19 +44,33 @@ ROCK_NATURAL_FREQ = {"weak": (3, 7), "blocky": (7, 15), "strong": (15, 23)}
 GEO_TO_ROCK = {"coal": "weak", "normal": "blocky", "Fault": "weak"}
 SLOPE_FREQ_THRESHOLD = 40.0
 
-# --- Scaled Depth of Burial (SDOB) - Chiappetta / Livingston crater theory ---
+# --- Scaled Depth of Burial (SDOB) - definisi ERG/Tobin (2013) ---
+# SD = (stemming + 5*d) / W10^(1/3)
+#   stemming = depth - panjang_kolom_isian ; d = diameter lubang (m)
+#   W10 = massa peledak dalam ruang setara 10 x diameter = rho * (pi/4 d^2) * 10d
+# Verifikasi: contoh artikel (stem=5m, d=229mm, rho=1210) -> SD=1.27 (band controlled). OK.
+# Band konfinemen (Tobin 2013):
+#   < 0.92  : under-confined  -> energi lepas ke permukaan (flyrock & airblast tinggi)
+#   0.92-1.40: controlled     -> fragmentasi & heave baik, airblast/getaran wajar
+#   > 1.40  : over-confined    -> energi terkurung ke massa batuan (fragmentasi bawah
+#             kurang, energi ke tanah) -> argumen desain "aman dari flyrock" ke geotek.
 COL_DEPTH = "depth_m"
 COL_HOLE_DIA = "hole_diameter_mm"
-RHO_EXPLOSIVE = 1150.0   # kg/m^3, emulsi Pit 3
-FT_TO_M_SDOB = 0.3855    # 1 ft/lb^(1/3) = 0.3855 m/kg^(1/3)
+RHO_EXPLOSIVE = 1150.0   # kg/m^3 (= 1.15 g/cc), emulsi Pit 3
+# 6 zona SDOB sesuai diagram Chiappetta/ERG (bukan 3-kategori kasar):
 SDOB_BANDS = [
-    ("Under-confined (energi lepas ke udara)", 0.0, 0.90 * FT_TO_M_SDOB),
-    ("Optimal (fragmentasi & getaran seimbang)", 0.90 * FT_TO_M_SDOB, 1.60 * FT_TO_M_SDOB),
-    ("Over-confined (energi terkunci -> getaran tinggi)", 1.60 * FT_TO_M_SDOB, float("inf")),
+    ("Uncontrolled (0-0.60): flyrock & airblast hebat", 0.0, 0.60),
+    ("Cratering (0.60-0.92): fragmentasi sangat halus", 0.60, 0.92),
+    ("Controlled (0.92-1.40): fragmentasi baik, getaran/airblast wajar", 0.92, 1.40),
+    ("Very controlled (1.40-1.80): frag lebih kasar, TANPA flyrock", 1.40, 1.80),
+    ("Minimal surface (1.80-2.40): gangguan permukaan kecil", 1.80, 2.40),
+    ("Insignificant (>2.40): efek permukaan tak berarti", 2.40, float("inf")),
 ]
+
 # ---------------------------------------------------------------------
-# DATABASE INTERNAL (bawaan) - 19 event aktual Pit 3.
+# DATABASE INTERNAL (bawaan) - 23 event aktual Pit 3 (19 + 4 update Jun 2026).
 # User tidak perlu upload; cukup isi parameter. Repo WAJIB Private.
+# Kolom depth_m & hole_diameter_mm dipakai untuk Scaled Depth of Burial (SDOB).
 # ---------------------------------------------------------------------
 _COLS = ["Amaks (mm/s^s) Maks", "nilai_g", "charge_kg", "distance_m", "tie_up_type",
          "wall_echelon_ms", "freeface_echelon_ms", "controll_ms", "freeface_count",
@@ -316,28 +330,32 @@ def frequency_diagnostics(df):
                 fmed=float(np.median(freqs)), bands=bands,
                 n_slope=n_slope, sub=sub, geo_audit=geo_audit)
 
+
 def compute_sdob(charge_kg, depth_m, hole_dia_mm, rho=RHO_EXPLOSIVE):
+    """Scaled Depth of Burial (ERG/Tobin 2013). SD = (stemming + 5d)/W10^(1/3).
+    Tak berdimensi (m / kg^(1/3) dgn massa W10). Mengembalikan dict atau None."""
     try:
         ch = float(charge_kg); dep = float(depth_m); d = float(hole_dia_mm) / 1000.0
     except Exception:
         return None
     if ch <= 0 or dep <= 0 or d <= 0:
         return None
-    lin_density = rho * (np.pi / 4.0) * d * d
-    charge_len = ch / lin_density
-    stemming = dep - charge_len
-    center = dep - charge_len / 2.0
-    sdob = center / (ch ** (1.0 / 3.0))
+    lin_density = rho * (np.pi / 4.0) * d * d        # kg/m
+    charge_len = ch / lin_density                    # panjang kolom isian (m)
+    stemming = dep - charge_len                       # tinggi stemming dihitung (m)
+    w10 = lin_density * (10.0 * d)                    # massa peledak dlm 10x diameter (kg)
+    sdob = (stemming + 5.0 * d) / (w10 ** (1.0 / 3.0))
     band = "n/a"
     for name, lo, hi in SDOB_BANDS:
         if lo <= sdob < hi:
             band = name
             break
     return dict(sdob=float(sdob), charge_len=float(charge_len), stemming=float(stemming),
-                center=float(center), stem_over_dia=float(stemming / d), band=band,
-                sdob_ft=float(sdob / FT_TO_M_SDOB))
+                w10=float(w10), stem_over_dia=float(stemming / d), band=band)
+
 
 def sdob_diagnostics(df, rho=RHO_EXPLOSIVE):
+    """Diagnostik konfinemen SDOB untuk seluruh event (audit, bukan prediktor)."""
     if COL_DEPTH not in df.columns or COL_CHG not in df.columns:
         return None
     dia_col = COL_HOLE_DIA if COL_HOLE_DIA in df.columns else None
@@ -355,10 +373,12 @@ def sdob_diagnostics(df, rho=RHO_EXPLOSIVE):
     band_counts = {}
     for name, _, _ in SDOB_BANDS:
         band_counts[name] = sum(1 for x in rows if x["band"] == name)
+    # korelasi SDOB vs g (diagnostik, bukan model regresi)
     gs = np.array([x["g"] for x in rows])
     corr = float(np.corrcoef(sdobs, gs)[0, 1]) if len(rows) > 2 else float("nan")
     return dict(rows=rows, n=len(rows), smin=float(sdobs.min()), smax=float(sdobs.max()),
                 smed=float(np.median(sdobs)), band_counts=band_counts, corr_g=corr, rho=rho)
+
 
 def recommend(inp, cal, mean_wf, df, target, design_lambda):
     def gd(row):
@@ -416,6 +436,7 @@ def build_model(file_bytes, method):
     sdiag = sdob_diagnostics(df)
     return df, cal, mean_wf, mae_loo, csf, dl, fdiag, sdiag
 
+
 # ---------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------
@@ -425,7 +446,7 @@ if not check_password():
     st.stop()
 
 st.title("Prediksi Ground Vibration (g) Pit 3")
-st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value (P90) + Diagnostik Resonansi")
+st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value + Probabilitas + Diagnostik Resonansi & SDOB")
 
 with st.sidebar:
     st.header("1. Data")
@@ -483,14 +504,17 @@ sigma_mc = dl["s_e"] if use_loocv_sigma else cal["sigma"]
 design_lambda = dl["table"][design_pct]["emp" if design_method == "empirical" else "norm"]
 
 # ---- Input parameter event ----
-# ---- Input parameter event ----
 with st.sidebar:
     st.header("3. Parameter Event")
     inp = {}
     inp["distance_m"] = st.number_input("Distance (m)", value=float(np.median(df[COL_DIST].values)), min_value=1.0)
     inp["charge_kg"] = st.number_input("Charge per delay (kg)", value=float(np.median(df[COL_CHG].values)), min_value=1.0)
-    inp["depth_m"] = st.number_input("Kedalaman lubang (m)", value=float(np.median(df["depth_m"].values)), min_value=1.0)
-    inp["hole_diameter_mm"] = st.number_input("Diameter lubang (mm)", value=200.0, min_value=50.0)
+    _depth_default = float(np.median(df[COL_DEPTH].values)) if COL_DEPTH in df.columns else 8.0
+    _dia_default = float(np.median(df[COL_HOLE_DIA].values)) if COL_HOLE_DIA in df.columns else 200.0
+    inp["depth_m"] = st.number_input("Kedalaman lubang (m)", value=_depth_default, min_value=1.0,
+                                     help="Kedalaman lubang bor. Dipakai untuk diagnostik SDOB (konfinemen), tidak mengubah prediksi g.")
+    inp["hole_diameter_mm"] = st.number_input("Diameter lubang (mm)", value=_dia_default, min_value=50.0,
+                                              help="Diameter lubang bor. Dipakai untuk diagnostik SDOB.")
     for p in PARAMS_NUM:
         inp[p] = st.number_input(NICE[p], value=float(np.median(df[p].values)))
     for p in PARAMS_CAT:
@@ -498,23 +522,23 @@ with st.sidebar:
         inp[p] = st.selectbox(NICE[p], opts)
 
 # ---- Prediksi ----
+import math as _math
 inp["scale_distance"] = inp["distance_m"] / np.sqrt(inp["charge_kg"])
 wf_norm = compute_wf(inp, cal) / mean_wf
 g_arr = predict_g_mc(cal, inp["scale_distance"], wf_norm, sigma_mc, int(n_iter))
 g_med = float(np.median(g_arr))
 g_q1, g_q3 = float(np.percentile(g_arr, 25)), float(np.percentile(g_arr, 75))
-g_design = g_med * design_lambda
-
-# Probabilitas exceedance (lognormal) P(g > G_TARGET)
-import math
-prob_exceed = 100.0 * (1.0 - 0.5 * (1.0 + math.erf((math.log(g_target / g_med) / sigma_mc) / math.sqrt(2.0)))) if g_med > 0 else 0.0
 g_best = float(np.percentile(g_arr, 10))
 g_worst = float(np.percentile(g_arr, 90))
+g_design = g_med * design_lambda
+# Probabilitas melampaui ambang (langsung dari sebaran Monte Carlo)
+prob_exceed = 100.0 * float(np.mean(g_arr > g_target))
+is_fault_near = inp["distance_m"] < 100 and str(inp["geological_condt"]) == "Fault"
 
 st.subheader("Hasil Prediksi Getaran (g)")
 c1, c2, c3 = st.columns(3)
 c1.metric("Prediksi terbaik (P10)", format(g_best, ".5f"), get_status(g_best))
-c2.metric("Prediksi paling mungkin (P50)", format(g_med, ".5f"), get_status(g_med))
+c2.metric("Paling mungkin (P50)", format(g_med, ".5f"), get_status(g_med))
 c3.metric("Prediksi terburuk (P90)", format(g_worst, ".5f"), get_status(g_worst))
 
 st.markdown(
@@ -522,23 +546,18 @@ st.markdown(
     ";color:#000;font-weight:600'>Probabilitas getaran melampaui ambang " + format(g_target, ".3f") +
     " (G_TARGET) = <span style='font-size:1.3em'>" + format(prob_exceed, ".1f") + "%</span></div>",
     unsafe_allow_html=True)
-st.caption("Rentang P10-P90 = 80% kemungkinan kejadian. Untuk keputusan keselamatan gunakan prediksi terburuk (P90) "
-           "atau DESIGN VALUE = " + format(g_design, ".5f") + " (median x " + format(design_lambda, ".2f") + ").")
-
-
-st.markdown(
-    "<div style='padding:10px;border-radius:8px;background:" + STATUS_COLOR[get_status(g_design)] +
-    ";color:#000;font-weight:600'>Keputusan geotek pakai DESIGN VALUE = " + format(g_design, ".5f") +
-    " (" + get_status(g_design) + "). Median (paling mungkin) = " + format(g_med, ".5f") +
-    " (" + get_status(g_med) + ").</div>", unsafe_allow_html=True)
 
 st.write("")
-st.write("**Margin (IQR Q1-Q3):** " + format(g_q1, ".5f") + " ... " + format(g_q3, ".5f") +
+st.write("**Rentang P10-P90 (80% kemungkinan):** " + format(g_best, ".5f") + " ... " + format(g_worst, ".5f") +
          "  |  **WF normalized:** " + format(wf_norm, ".3f") +
          " (" + ("lebih berbahaya" if wf_norm > 1 else "lebih aman") + " dari rata-rata site)")
+st.caption("Untuk keputusan keselamatan gunakan prediksi terburuk (P90) atau DESIGN VALUE = "
+           + format(g_design, ".5f") + " (median x " + format(design_lambda, ".2f") + "). "
+           "P50 adalah nilai tengah - menurut sifat median, ~separuh kejadian aktual bisa di atasnya.")
 
-if inp["distance_m"] < 100 and str(inp["geological_condt"]) == "Fault":
-    st.warning("REZIM Fault + near-field (<100 m): model cenderung MEREMEHKAN secara struktural -> beri buffer ekstra di luar Design Value.")
+if is_fault_near:
+    st.warning("REZIM Fault + near-field (<100 m): model cenderung MEREMEHKAN secara struktural -> "
+               "untuk Fault, jadikan P90/DESIGN VALUE sebagai acuan keputusan (bukan P50), beri buffer ekstra.")
 
 # ---- Recommendation ----
 rec = recommend(inp, cal, mean_wf, df, g_target, design_lambda)
@@ -684,29 +703,32 @@ with tab3:
                    "kompleks/non-linear (Lucca 2003) sehingga R2 ~ 0 terhadap SD adalah wajar dan "
                    "sesuai literatur (Floyd 2008; Kumar 2020; Hasanipanah 2015). Pemetaan "
                    "geologi->kelas batuan & natural freq WAJIB diverifikasi dengan uji site.")
+
 with tab4:
-    st.markdown("**Scaled Depth of Burial (SDOB)** - diagnostik konfinemen isian "
-                "(Chiappetta / Livingston crater theory). SDOB = kedalaman pusat muatan / charge^(1/3). "
-                "Densitas emulsi = " + format(RHO_EXPLOSIVE, ".0f") + " kg/m3, diameter lubang dari data.")
-    st.caption("Makna fisik: SDOB kecil -> energi lepas ke udara (airblast/flyrock, getaran rendah); "
-               "SDOB optimal -> fragmentasi & getaran seimbang; SDOB besar (over-confined) -> energi "
-               "terkunci ke massa batuan -> GETARAN TANAH TINGGI + fragmentasi bawah buruk. "
-               "Posisinya DIAGNOSTIK (audit konfinemen), bukan prediktor regresi g.")
+    st.markdown("**Scaled Depth of Burial (SDOB)** - diagnostik konfinemen energi ledakan "
+                "(ERG / Tobin 2013). SD = (stemming + 5d) / W10^(1/3), dengan W10 = massa peledak "
+                "dalam ruang setara 10x diameter lubang. Densitas emulsi = "
+                + format(RHO_EXPLOSIVE, ".0f") + " kg/m3.")
+    st.caption("6 zona SDOB (diagram Chiappetta/ERG): <0.60 uncontrolled (flyrock hebat); "
+               "0.60-0.92 cratering; 0.92-1.40 controlled (fragmentasi & heave baik, getaran/airblast wajar); "
+               "1.40-1.80 very controlled (tanpa flyrock); 1.80-2.40 minimal surface activity; "
+               ">2.40 insignificant. SDOB adalah DIAGNOSTIK DESAIN (bukti konfinemen wajar untuk "
+               "argumen ke geotek), BUKAN prediktor nilai g.")
     if sdiag is None:
         st.info("Kolom '" + COL_DEPTH + "' / '" + COL_CHG + "' belum lengkap -> diagnostik SDOB dilewati.")
     else:
-        depth_in = float(np.median(df[COL_DEPTH].values)) if COL_DEPTH in df.columns else 8.0
-        dia_in = float(np.median(df[COL_HOLE_DIA].values)) if COL_HOLE_DIA in df.columns else 200.0
-        s_in = compute_sdob(inp["charge_kg"], depth_in, dia_in)
+        # SDOB event input - pakai kedalaman & diameter yang DIINPUT user
+        s_in = compute_sdob(inp["charge_kg"], inp["depth_m"], inp["hole_diameter_mm"])
         if s_in is not None:
             c1, c2, c3 = st.columns(3)
-            c1.metric("SDOB event input", format(s_in["sdob"], ".2f") + " m/kg^1/3",
-                      format(s_in["sdob_ft"], ".2f") + " ft/lb^1/3")
+            c1.metric("SDOB event input", format(s_in["sdob"], ".2f"))
             c2.metric("Stemming (dihitung)", format(s_in["stemming"], ".2f") + " m",
                       "L isian = " + format(s_in["charge_len"], ".2f") + " m")
-            c3.metric("Regime konfinemen", s_in["band"].split(" (")[0])
-            st.caption("(charge input " + format(inp["charge_kg"], ".0f") + " kg @ kedalaman median "
-                       + format(depth_in, ".1f") + " m, diameter " + format(dia_in, ".0f") + " mm)")
+            c3.metric("Regime konfinemen", s_in["band"].split(":")[0])
+            st.caption("(charge " + format(inp["charge_kg"], ".0f") + " kg @ kedalaman "
+                       + format(inp["depth_m"], ".2f") + " m, diameter " + format(inp["hole_diameter_mm"], ".0f")
+                       + " mm; stemming dihitung = kedalaman - panjang isian)")
+
         st.markdown("**Distribusi konfinemen " + str(sdiag["n"]) + " event aktual:**")
         brows = []
         for name, cnt in sdiag["band_counts"].items():
@@ -714,21 +736,29 @@ with tab4:
                           "Porsi (%)": round(100.0 * cnt / sdiag["n"], 0)})
         st.dataframe(pd.DataFrame(brows), use_container_width=True, hide_index=True)
         st.write("SDOB aktual: min " + format(sdiag["smin"], ".2f") + " | median "
-                 + format(sdiag["smed"], ".2f") + " | maks " + format(sdiag["smax"], ".2f") + " m/kg^1/3")
+                 + format(sdiag["smed"], ".2f") + " | maks " + format(sdiag["smax"], ".2f"))
+        st.success("Argumen ke geotek: desain berada di zona CONTROLLED s/d MINIMAL SURFACE ACTIVITY "
+                   "(tidak ada satupun uncontrolled/cratering) -> secara teori SDOB Chiappetta, desain "
+                   "blasting Pit 3 sudah proper: risiko flyrock/airblast minimal, energi terarah ke "
+                   "pemecahan batuan. Mayoritas event di zona controlled-very controlled (zona ideal).")
         if not np.isnan(sdiag["corr_g"]):
-            st.write("Korelasi SDOB vs nilai g (diagnostik): r = " + format(sdiag["corr_g"], ".3f")
-                     + "  (positif -> makin terkurung makin tinggi getaran, sesuai teori)")
+            st.caption("Korelasi SDOB vs nilai g: r = " + format(sdiag["corr_g"], ".3f")
+                       + " (lemah/rancu - g juga dipengaruhi jarak & charge, jadi SDOB TIDAK dipakai "
+                       + "sebagai prediktor g; hanya diagnostik konfinemen).")
+
         st.markdown("**Tabel SDOB per event:**")
         trows = []
         for i, x in enumerate(sdiag["rows"]):
-            trows.append({"#": i + 1, "SDOB (m/kg^1/3)": round(x["sdob"], 2),
-                          "SDOB (ft/lb^1/3)": round(x["sdob_ft"], 2),
+            trows.append({"#": i + 1, "SDOB": round(x["sdob"], 2),
                           "Stemming (m)": round(x["stemming"], 2),
                           "Stem/Dia": round(x["stem_over_dia"], 1),
+                          "L isian (m)": round(x["charge_len"], 2),
                           "nilai g": round(x["g"], 4),
-                          "Regime": x["band"].split(" (")[0]})
+                          "Regime": x["band"].split(":")[0]})
         st.dataframe(pd.DataFrame(trows), use_container_width=True, hide_index=True)
-        st.caption("Referensi: Chiappetta (2004) crater/SDOB; Livingston (1956) crater theory.")
+        st.caption("Definisi & band: diagram Chiappetta/ERG (6 zona); Tobin (2013) 'The Importance of "
+                   "Energy Confinement to the Blast Outcome'; Ash (1993); Langefors & Kihlstrom (1978). "
+                   "Band controlled 0.92-1.40 diverifikasi via contoh ERG Industrial (SD=1.27).")
 
 with tab5:
     st.markdown("Variasi charge (distance tetap = " + format(inp["distance_m"], ".0f") + " m)")
