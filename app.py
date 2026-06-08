@@ -487,7 +487,8 @@ with st.sidebar:
     st.header("3. Parameter Event")
     inp = {}
     inp["distance_m"] = st.number_input("Distance (m)", value=float(np.median(df[COL_DIST].values)), min_value=1.0)
-    inp["charge_kg"] = st.number_input("Charge per delay (kg)", value=float(np.median(df[COL_CHG].values)), min_value=1.0)
+    inp["depth_m"] = st.number_input("Kedalaman lubang (m)", value=float(np.median(df[COL_DEPTH].values)), min_value=1.0)
+    inp["hole_diameter_mm"] = st.number_input("Diameter lubang (mm)", value=200.0, min_value=50.0)
     for p in PARAMS_NUM:
         inp[p] = st.number_input(NICE[p], value=float(np.median(df[p].values)))
     for p in PARAMS_CAT:
@@ -502,11 +503,26 @@ g_med = float(np.median(g_arr))
 g_q1, g_q3 = float(np.percentile(g_arr, 25)), float(np.percentile(g_arr, 75))
 g_design = g_med * design_lambda
 
-st.subheader("Hasil Prediksi")
+# Probabilitas exceedance (lognormal) P(g > G_TARGET)
+import math
+prob_exceed = 100.0 * (1.0 - 0.5 * (1.0 + math.erf((math.log(g_target / g_med) / sigma_mc) / math.sqrt(2.0)))) if g_med > 0 else 0.0
+g_best = float(np.percentile(g_arr, 10))
+g_worst = float(np.percentile(g_arr, 90))
+
+st.subheader("Hasil Prediksi Getaran (g)")
 c1, c2, c3 = st.columns(3)
-c1.metric("Median g (harapan / mining)", format(g_med, ".5f"), get_status(g_med))
-c2.metric("DESIGN VALUE P" + str(design_pct) + " (geotek)", format(g_design, ".5f"), get_status(g_design))
-c3.metric("Faktor konservatisme", "x " + format(design_lambda, ".2f"), "sigma MC = " + format(sigma_mc, ".3f"))
+c1.metric("Prediksi terbaik (P10)", format(g_best, ".5f"), get_status(g_best))
+c2.metric("Prediksi paling mungkin (P50)", format(g_med, ".5f"), get_status(g_med))
+c3.metric("Prediksi terburuk (P90)", format(g_worst, ".5f"), get_status(g_worst))
+
+st.markdown(
+    "<div style='padding:12px;border-radius:8px;background:" + STATUS_COLOR[get_status(g_worst)] +
+    ";color:#000;font-weight:600'>Probabilitas getaran melampaui ambang " + format(g_target, ".3f") +
+    " (G_TARGET) = <span style='font-size:1.3em'>" + format(prob_exceed, ".1f") + "%</span></div>",
+    unsafe_allow_html=True)
+st.caption("Rentang P10-P90 = 80% kemungkinan kejadian. Untuk keputusan keselamatan gunakan prediksi terburuk (P90) "
+           "atau DESIGN VALUE = " + format(g_design, ".5f") + " (median x " + format(design_lambda, ".2f") + ").")
+
 
 st.markdown(
     "<div style='padding:10px;border-radius:8px;background:" + STATUS_COLOR[get_status(g_design)] +
