@@ -90,10 +90,23 @@ ROCK_NATURAL_FREQ    = {'weak': (3, 7), 'blocky': (7, 15), 'strong': (15, 23)}
 GEO_TO_ROCK          = {'coal': 'weak', 'normal': 'blocky', 'Fault': 'weak'}
 SLOPE_FREQ_THRESHOLD = 40.0
 
+# --- Scaled Depth of Burial (SDOB) - ERG/Tobin (2013) ---
+# SD = (stemming + 5d) / W10^(1/3); W10 = rho * (pi/4 d^2) * 10d.
+# Verifikasi contoh artikel (stem=5m, d=229mm, rho=1210) -> SD=1.27 (controlled).
+COL_DEPTH     = 'depth_m'
+COL_HOLE_DIA  = 'hole_diameter_mm'
+RHO_EXPLOSIVE = 1150.0   # kg/m^3, emulsi Pit 3
+SDOB_BANDS = [
+    ('Under-confined (<0.92): flyrock & airblast tinggi', 0.0, 0.92),
+    ('Controlled (0.92-1.40): fragmentasi & getaran wajar', 0.92, 1.40),
+    ('Over-confined (>1.40): energi terkurung ke massa batuan', 1.40, float('inf')),
+]
+
 INPUT = {
     'distance_m': 200, 'charge_kg': 37, 'row_number': 5, 'controll_ms': 67,
     'wall_echelon_ms': 42, 'freeface_echelon_ms': 0, 'freeface_count': 1,
     'geological_condt': 'normal', 'measuring_elevation': 'higher', 'tie_up_type': 'echelon',
+    'depth_m': 7.45, 'hole_diameter_mm': 200,   # untuk diagnostik SDOB (tidak mengubah prediksi g)
 }
 
 SEP  = '=' * 64
@@ -264,7 +277,51 @@ def frequency_diagnostics(df):
     return dict(n=n, fmin=float(np.min(freqs)), fmax=float(np.max(freqs)),
                 fmed=float(np.median(freqs)), bands=bands, n_slope=n_slope, geo_audit=geo_audit)
 
-def importance_metrics(cal, inp_row, mean_wf):
+def compute_sdob(charge_kg, depth_m, hole_dia_mm, rho=RHO_EXPLOSIVE):
+    """Scaled Depth of Burial (ERG/Tobin 2013): SD = (stemming + 5d)/W10^(1/3)."""
+    try:
+        ch = float(charge_kg); dep = float(depth_m); d = float(hole_dia_mm) / 1000.0
+    except Exception:
+        return None
+    if ch <= 0 or dep <= 0 or d <= 0:
+        return None
+    lin_density = rho * (np.pi / 4.0) * d * d        # kg/m
+    charge_len = ch / lin_density                    # panjang kolom isian (m)
+    stemming = dep - charge_len                       # tinggi stemming (m)
+    w10 = lin_density * (10.0 * d)                    # massa peledak dlm 10x diameter (kg)
+    sdob = (stemming + 5.0 * d) / (w10 ** (1.0 / 3.0))
+    band = 'n/a'
+    for name, lo, hi in SDOB_BANDS:
+        if lo <= sdob < hi:
+            band = name
+            break
+    return dict(sdob=float(sdob), charge_len=float(charge_len), stemming=float(stemming),
+                w10=float(w10), stem_over_dia=float(stemming / d), band=band)
+
+def sdob_diagnostics(df, rho=RHO_EXPLOSIVE):
+    if COL_DEPTH not in df.columns or COL_CHG not in df.columns:
+        return None
+    dia_col = COL_HOLE_DIA if COL_HOLE_DIA in df.columns else None
+    rows = []
+    for _, r in df.iterrows():
+        dia = r[dia_col] if dia_col else 200.0
+        s = compute_sdob(r[COL_CHG], r[COL_DEPTH], dia, rho)
+        if s is None:
+            continue
+        s['g'] = float(r[COL_G]) if COL_G in df.columns else float('nan')
+        rows.append(s)
+    if not rows:
+        return None
+    sdobs = np.array([x['sdob'] for x in rows])
+    band_counts = {}
+    for name, _, _ in SDOB_BANDS:
+        band_counts[name] = sum(1 for x in rows if x['band'] == name)
+    gs = np.array([x['g'] for x in rows])
+    corr = float(np.corrcoef(sdobs, gs)[0, 1]) if len(rows) > 2 else float('nan')
+    return dict(rows=rows, n=len(rows), smin=float(sdobs.min()), smax=float(sdobs.max()),
+                smed=float(np.median(sdobs)), band_counts=band_counts, corr_g=corr)
+
+
     weight = cal['weight']
     A = {p: weight[p] for p in ALL_PARAMS}
     B, levels, g_levels = {}, {}, {}
@@ -383,6 +440,7 @@ dl      = design_limits(pairs)
 sigma_mc      = dl['s_e'] if USE_LOOCV_SIGMA else cal['sigma']
 design_lambda = dl['table'][DESIGN_PCT]['emp' if DESIGN_METHOD == 'empirical' else 'norm']
 fdiag   = frequency_diagnostics(df)
+sdiag   = sdob_diagnostics(df)
 
 print(''); print('  File        : ' + str(DATA_FILE))
 print('  Jumlah data : ' + str(n_data) + ' event')
@@ -457,9 +515,10 @@ g_arr  = predict_g_mc(cal, INPUT['scale_distance'], wf_norm_input, sigma_mc)
 g_pred = float(np.median(g_arr))
 g_q1   = float(np.percentile(g_arr, 25))
 g_q3   = float(np.percentile(g_arr, 75))
+g_best  = float(np.percentile(g_arr, 10))
+g_worst = float(np.percentile(g_arr, 90))
 g_design = g_pred * design_lambda
-margin_up = round(g_q3 - g_pred, 6)
-margin_dn = round(g_pred - g_q1, 6)
+prob_exceed = 100.0 * float(np.mean(g_arr > G_TARGET))   # probabilitas melampaui ambang
 warns = check_extrapolation(INPUT, df)
 
 print(''); print('' + SEP)
@@ -481,20 +540,23 @@ print(''); print('' + SEP2)
 print('   HASIL PREDIKSI - ' + format(N_ITER, ',') + ' SIMULASI MONTE CARLO')
 print(SEP2)
 print('')
-print('  Median g (MINING/harapan)   :  ' + str(round(g_pred, 6)) + '      Status: ' + get_status(g_pred))
-print('  DESIGN VALUE P' + str(DESIGN_PCT) + ' (GEOTEK)  :  ' + str(round(g_design, 6)) + '      Status: ' + get_status(g_design))
-print('  Faktor konservatisme        :  x ' + format(design_lambda, '.2f') + '   (sigma MC = ' + format(sigma_mc, '.3f') + ', ' + ('LOOCV' if USE_LOOCV_SIGMA else 'in-sample') + ')')
-print('  Margin of Error             :  +' + str(margin_up) + ' / -' + str(margin_dn) + '   (IQR Q1..Q3)')
-print('  Skenario Terbaik / Terburuk :  ' + str(round(g_q1, 6)) + ' / ' + str(round(g_q3, 6)))
+print('  Prediksi terbaik  (P10)     :  ' + str(round(g_best, 6)) + '      Status: ' + get_status(g_best))
+print('  Paling mungkin    (P50)     :  ' + str(round(g_pred, 6)) + '      Status: ' + get_status(g_pred))
+print('  Prediksi terburuk (P90)     :  ' + str(round(g_worst, 6)) + '      Status: ' + get_status(g_worst))
+print('  PROBABILITAS g > ' + format(G_TARGET, '.3f') + '     :  ' + format(prob_exceed, '.1f') + '%   <- ukuran risiko paling konkret')
+print('  DESIGN VALUE P' + str(DESIGN_PCT) + ' (x' + format(design_lambda, '.2f') + ') :  ' + str(round(g_design, 6)) + '      Status: ' + get_status(g_design))
+print('  (sigma MC = ' + format(sigma_mc, '.3f') + ', ' + ('LOOCV' if USE_LOOCV_SIGMA else 'in-sample') + ')')
 print('')
 print(SEP2)
 print('   RINGKASAN UNTUK RAPAT')
 print(SEP2)
 print('')
-print('  [MINING] Median   = ' + str(round(g_pred, 6)) + ' (' + get_status(g_pred) + ')  <- nilai paling mungkin')
-print('  [GEOTEK] DESIGN   = ' + str(round(g_design, 6)) + ' (' + get_status(g_design) + ')  <- untuk keputusan keselamatan')
-print('  Variasi kondisi lapangan: ' + str(round(g_q1, 6)) + ' - ' + str(round(g_q3, 6)))
+print('  Rentang P10-P90 (80% kemungkinan): ' + str(round(g_best, 6)) + ' - ' + str(round(g_worst, 6)))
+print('  Probabilitas melampaui ambang ' + format(G_TARGET, '.3f') + ' = ' + format(prob_exceed, '.1f') + '%')
+print('  Acuan keputusan keselamatan: P90 = ' + str(round(g_worst, 6)) + ' atau DESIGN = ' + str(round(g_design, 6)))
 print('  Perkiraan error model (LOOCV): +/- ' + format(mae_loo, '.4f'))
+print('  CATATAN: P50 adalah nilai tengah; menurut sifat median ~separuh kejadian aktual')
+print('           dapat berada di atasnya. Untuk Fault/near-field, pakai P90/DESIGN sbg acuan.')
 print('')
 
 # --- RECOMMENDATION ENGINE: aktif jika DESIGN g melebihi ambang aman ---
@@ -557,6 +619,38 @@ if fdiag is not None:
         print('    ' + str(geo).ljust(8) + 'rock=' + str(a['rock']).ljust(8) + 'nat=' + rng_txt.ljust(10) + 'n=' + str(a['n']) + ' | freq ' + format(a['fmin'], '.1f') + '-' + format(a['fmax'], '.1f') + ' | di zona resonansi: ' + str(a['in_res']))
     print('  Catatan: freq tergantung geologi/jarak/delay (non-linear; Lucca 2003);')
     print('  R2~0 terhadap SD adalah wajar. Pustaka: Floyd 2008, Kumar 2020, Hasanipanah 2015.')
+
+# =====================================================================
+# [G2] DIAGNOSTIK SDOB (Scaled Depth of Burial) - ERG/Tobin 2013
+# =====================================================================
+
+s_in = compute_sdob(INPUT['charge_kg'], INPUT['depth_m'], INPUT['hole_diameter_mm'])
+if s_in is not None:
+    print(''); print('' + SEP)
+    print('   DIAGNOSTIK SDOB - konfinemen energi (ERG/Tobin 2013), bukan prediktor g')
+    print(SEP)
+    print('  SD = (stemming + 5d) / W10^(1/3) ; W10 = massa peledak dlm 10x diameter.')
+    print('  Densitas emulsi = ' + format(RHO_EXPLOSIVE, '.0f') + ' kg/m3, diameter = ' + format(INPUT['hole_diameter_mm'], '.0f') + ' mm.')
+    print(''); print('  Event input (charge ' + str(INPUT['charge_kg']) + ' kg @ kedalaman ' + format(INPUT['depth_m'], '.2f') + ' m):')
+    print('    panjang isian = ' + format(s_in['charge_len'], '.2f') + ' m | stemming (dihitung) = ' + format(s_in['stemming'], '.2f') + ' m | stem/dia = ' + format(s_in['stem_over_dia'], '.1f'))
+    print('    SDOB = ' + format(s_in['sdob'], '.3f') + '  -> ' + s_in['band'])
+if sdiag is not None:
+    print(''); print('  Distribusi konfinemen ' + str(sdiag['n']) + ' event aktual:')
+    for name, _, _ in SDOB_BANDS:
+        c = sdiag['band_counts'].get(name, 0)
+        print('    ' + name.split(':')[0].ljust(22) + ': ' + str(c) + ' event (' + format(100.0 * c / sdiag['n'], '.0f') + '%)')
+    print('  SDOB aktual: min ' + format(sdiag['smin'], '.2f') + ' | median ' + format(sdiag['smed'], '.2f') + ' | maks ' + format(sdiag['smax'], '.2f'))
+    print('  Korelasi SDOB vs g: r = ' + format(sdiag['corr_g'], '.3f') + ' (lemah/rancu -> g jg dipengaruhi jarak & charge;')
+    print('    SDOB TIDAK dipakai sbg prediktor g, hanya diagnostik konfinemen).')
+    print('  ARGUMEN GEOTEK: desain berada di regime controlled s/d over-confined (tdk ada under-confined)')
+    print('    -> secara teori SDOB, desain proper: risiko flyrock/airblast minimal, energi ke pemecahan batuan.')
+    print('  Tabel SDOB per event:')
+    print('    #   SDOB   stemming  stem/dia  L_isian   nilai_g   regime')
+    for i, x in enumerate(sdiag['rows']):
+        print('    ' + str(i + 1).rjust(2) + format(x['sdob'], '.2f').rjust(7) + format(x['stemming'], '.2f').rjust(9)
+              + format(x['stem_over_dia'], '.1f').rjust(9) + format(x['charge_len'], '.2f').rjust(9)
+              + format(x['g'], '.4f').rjust(10) + '   ' + x['band'].split(':')[0])
+    print('  Pustaka: Tobin (2013); Ash (1993); Langefors & Kihlstrom (1978).')
 
 # =====================================================================
 # [H] VISUALISASI - BAR CHART (Sobol) + HEATMAP
