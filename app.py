@@ -44,6 +44,16 @@ ROCK_NATURAL_FREQ = {"weak": (3, 7), "blocky": (7, 15), "strong": (15, 23)}
 GEO_TO_ROCK = {"coal": "weak", "normal": "blocky", "Fault": "weak"}
 SLOPE_FREQ_THRESHOLD = 40.0
 
+# --- Scaled Depth of Burial (SDOB) - Chiappetta / Livingston crater theory ---
+COL_DEPTH = "depth_m"
+COL_HOLE_DIA = "hole_diameter_mm"
+RHO_EXPLOSIVE = 1150.0   # kg/m^3, emulsi Pit 3
+FT_TO_M_SDOB = 0.3855    # 1 ft/lb^(1/3) = 0.3855 m/kg^(1/3)
+SDOB_BANDS = [
+    ("Under-confined (energi lepas ke udara)", 0.0, 0.90 * FT_TO_M_SDOB),
+    ("Optimal (fragmentasi & getaran seimbang)", 0.90 * FT_TO_M_SDOB, 1.60 * FT_TO_M_SDOB),
+    ("Over-confined (energi terkunci -> getaran tinggi)", 1.60 * FT_TO_M_SDOB, float("inf")),
+]
 # ---------------------------------------------------------------------
 # DATABASE INTERNAL (bawaan) - 19 event aktual Pit 3.
 # User tidak perlu upload; cukup isi parameter. Repo WAJIB Private.
@@ -306,6 +316,49 @@ def frequency_diagnostics(df):
                 fmed=float(np.median(freqs)), bands=bands,
                 n_slope=n_slope, sub=sub, geo_audit=geo_audit)
 
+def compute_sdob(charge_kg, depth_m, hole_dia_mm, rho=RHO_EXPLOSIVE):
+    try:
+        ch = float(charge_kg); dep = float(depth_m); d = float(hole_dia_mm) / 1000.0
+    except Exception:
+        return None
+    if ch <= 0 or dep <= 0 or d <= 0:
+        return None
+    lin_density = rho * (np.pi / 4.0) * d * d
+    charge_len = ch / lin_density
+    stemming = dep - charge_len
+    center = dep - charge_len / 2.0
+    sdob = center / (ch ** (1.0 / 3.0))
+    band = "n/a"
+    for name, lo, hi in SDOB_BANDS:
+        if lo <= sdob < hi:
+            band = name
+            break
+    return dict(sdob=float(sdob), charge_len=float(charge_len), stemming=float(stemming),
+                center=float(center), stem_over_dia=float(stemming / d), band=band,
+                sdob_ft=float(sdob / FT_TO_M_SDOB))
+
+def sdob_diagnostics(df, rho=RHO_EXPLOSIVE):
+    if COL_DEPTH not in df.columns or COL_CHG not in df.columns:
+        return None
+    dia_col = COL_HOLE_DIA if COL_HOLE_DIA in df.columns else None
+    rows = []
+    for _, r in df.iterrows():
+        dia = r[dia_col] if dia_col else 200.0
+        s = compute_sdob(r[COL_CHG], r[COL_DEPTH], dia, rho)
+        if s is None:
+            continue
+        s["g"] = float(r[COL_G]) if COL_G in df.columns else float("nan")
+        rows.append(s)
+    if not rows:
+        return None
+    sdobs = np.array([x["sdob"] for x in rows])
+    band_counts = {}
+    for name, _, _ in SDOB_BANDS:
+        band_counts[name] = sum(1 for x in rows if x["band"] == name)
+    gs = np.array([x["g"] for x in rows])
+    corr = float(np.corrcoef(sdobs, gs)[0, 1]) if len(rows) > 2 else float("nan")
+    return dict(rows=rows, n=len(rows), smin=float(sdobs.min()), smax=float(sdobs.max()),
+                smed=float(np.median(sdobs)), band_counts=band_counts, corr_g=corr, rho=rho)
 
 def recommend(inp, cal, mean_wf, df, target, design_lambda):
     def gd(row):
@@ -360,8 +413,8 @@ def build_model(file_bytes, method):
     csf = csf_metrics(pairs)
     dl = design_limits(pairs)
     fdiag = frequency_diagnostics(df)
-    return df, cal, mean_wf, mae_loo, csf, dl, fdiag
-
+    sdiag = sdob_diagnostics(df)
+    return df, cal, mean_wf, mae_loo, csf, dl, fdiag, sdiag
 
 # ---------------------------------------------------------------------
 # UI
@@ -420,7 +473,7 @@ with st.sidebar:
 
 file_bytes = up.getvalue() if up is not None else None
 try:
-    df, cal, mean_wf, mae_loo, csf, dl, fdiag = build_model(file_bytes, method)
+    df, cal, mean_wf, mae_loo, csf, dl, fdiag, sdiag = build_model(file_bytes, method)
 except Exception as e:
     st.error("Gagal memproses data: " + str(e))
     st.stop()
@@ -491,7 +544,7 @@ else:
     st.info("Proyeksi bila saran diterapkan -> median " + format(rec["final_median"], ".5f") + ", DESIGN " + format(rec["final_design"], ".5f"))
 
 # ---- Tabs analisis ----
-tab1, tab2, tab3, tab4 = st.tabs(["Faktor (Sobol + Heatmap)", "Validasi & CSF", "Diagnostik Resonansi", "Sensitivity Charge"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Faktor (Sobol + Heatmap)", "Validasi & CSF", "Diagnostik Resonansi", "Diagnostik SDOB", "Sensitivity Charge"])
 
 imp = importance_metrics(cal, inp, mean_wf)
 order = sorted(ALL_PARAMS, key=lambda p: -imp["sobol"][p])
@@ -613,8 +666,53 @@ with tab3:
                    "kompleks/non-linear (Lucca 2003) sehingga R2 ~ 0 terhadap SD adalah wajar dan "
                    "sesuai literatur (Floyd 2008; Kumar 2020; Hasanipanah 2015). Pemetaan "
                    "geologi->kelas batuan & natural freq WAJIB diverifikasi dengan uji site.")
-
 with tab4:
+    st.markdown("**Scaled Depth of Burial (SDOB)** - diagnostik konfinemen isian "
+                "(Chiappetta / Livingston crater theory). SDOB = kedalaman pusat muatan / charge^(1/3). "
+                "Densitas emulsi = " + format(RHO_EXPLOSIVE, ".0f") + " kg/m3, diameter lubang dari data.")
+    st.caption("Makna fisik: SDOB kecil -> energi lepas ke udara (airblast/flyrock, getaran rendah); "
+               "SDOB optimal -> fragmentasi & getaran seimbang; SDOB besar (over-confined) -> energi "
+               "terkunci ke massa batuan -> GETARAN TANAH TINGGI + fragmentasi bawah buruk. "
+               "Posisinya DIAGNOSTIK (audit konfinemen), bukan prediktor regresi g.")
+    if sdiag is None:
+        st.info("Kolom '" + COL_DEPTH + "' / '" + COL_CHG + "' belum lengkap -> diagnostik SDOB dilewati.")
+    else:
+        depth_in = float(np.median(df[COL_DEPTH].values)) if COL_DEPTH in df.columns else 8.0
+        dia_in = float(np.median(df[COL_HOLE_DIA].values)) if COL_HOLE_DIA in df.columns else 200.0
+        s_in = compute_sdob(inp["charge_kg"], depth_in, dia_in)
+        if s_in is not None:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("SDOB event input", format(s_in["sdob"], ".2f") + " m/kg^1/3",
+                      format(s_in["sdob_ft"], ".2f") + " ft/lb^1/3")
+            c2.metric("Stemming (dihitung)", format(s_in["stemming"], ".2f") + " m",
+                      "L isian = " + format(s_in["charge_len"], ".2f") + " m")
+            c3.metric("Regime konfinemen", s_in["band"].split(" (")[0])
+            st.caption("(charge input " + format(inp["charge_kg"], ".0f") + " kg @ kedalaman median "
+                       + format(depth_in, ".1f") + " m, diameter " + format(dia_in, ".0f") + " mm)")
+        st.markdown("**Distribusi konfinemen " + str(sdiag["n"]) + " event aktual:**")
+        brows = []
+        for name, cnt in sdiag["band_counts"].items():
+            brows.append({"Regime SDOB": name, "Jumlah event": cnt,
+                          "Porsi (%)": round(100.0 * cnt / sdiag["n"], 0)})
+        st.dataframe(pd.DataFrame(brows), use_container_width=True, hide_index=True)
+        st.write("SDOB aktual: min " + format(sdiag["smin"], ".2f") + " | median "
+                 + format(sdiag["smed"], ".2f") + " | maks " + format(sdiag["smax"], ".2f") + " m/kg^1/3")
+        if not np.isnan(sdiag["corr_g"]):
+            st.write("Korelasi SDOB vs nilai g (diagnostik): r = " + format(sdiag["corr_g"], ".3f")
+                     + "  (positif -> makin terkurung makin tinggi getaran, sesuai teori)")
+        st.markdown("**Tabel SDOB per event:**")
+        trows = []
+        for i, x in enumerate(sdiag["rows"]):
+            trows.append({"#": i + 1, "SDOB (m/kg^1/3)": round(x["sdob"], 2),
+                          "SDOB (ft/lb^1/3)": round(x["sdob_ft"], 2),
+                          "Stemming (m)": round(x["stemming"], 2),
+                          "Stem/Dia": round(x["stem_over_dia"], 1),
+                          "nilai g": round(x["g"], 4),
+                          "Regime": x["band"].split(" (")[0]})
+        st.dataframe(pd.DataFrame(trows), use_container_width=True, hide_index=True)
+        st.caption("Referensi: Chiappetta (2004) crater/SDOB; Livingston (1956) crater theory.")
+
+with tab5:
     st.markdown("Variasi charge (distance tetap = " + format(inp["distance_m"], ".0f") + " m)")
     charges = sorted(set([int(df[COL_CHG].min()), 35, 40, 45, 50, 55, 60, 70, int(df[COL_CHG].max())]))
     rows = []
