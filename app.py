@@ -56,11 +56,15 @@ SLOPE_FREQ_THRESHOLD = 40.0
 #             kurang, energi ke tanah) -> argumen desain "aman dari flyrock" ke geotek.
 COL_DEPTH = "depth_m"
 COL_HOLE_DIA = "hole_diameter_mm"
-RHO_EXPLOSIVE = 1150.0   # kg/m^3, emulsi Pit 3
+RHO_EXPLOSIVE = 1150.0   # kg/m^3 (= 1.15 g/cc), emulsi Pit 3
+# 6 zona SDOB sesuai diagram Chiappetta/ERG (bukan 3-kategori kasar):
 SDOB_BANDS = [
-    ("Under-confined (<0.92): flyrock & airblast tinggi", 0.0, 0.92),
-    ("Controlled (0.92-1.40): fragmentasi & getaran wajar", 0.92, 1.40),
-    ("Over-confined (>1.40): energi terkurung ke massa batuan", 1.40, float("inf")),
+    ("Uncontrolled (0-0.60): flyrock & airblast hebat", 0.0, 0.60),
+    ("Cratering (0.60-0.92): fragmentasi sangat halus", 0.60, 0.92),
+    ("Controlled (0.92-1.40): fragmentasi baik, getaran/airblast wajar", 0.92, 1.40),
+    ("Very controlled (1.40-1.80): frag lebih kasar, TANPA flyrock", 1.40, 1.80),
+    ("Minimal surface (1.80-2.40): gangguan permukaan kecil", 1.80, 2.40),
+    ("Insignificant (>2.40): efek permukaan tak berarti", 2.40, float("inf")),
 ]
 
 # ---------------------------------------------------------------------
@@ -705,10 +709,11 @@ with tab4:
                 "(ERG / Tobin 2013). SD = (stemming + 5d) / W10^(1/3), dengan W10 = massa peledak "
                 "dalam ruang setara 10x diameter lubang. Densitas emulsi = "
                 + format(RHO_EXPLOSIVE, ".0f") + " kg/m3.")
-    st.caption("Makna: SD < 0.92 = under-confined (flyrock & airblast tinggi); 0.92-1.40 = controlled "
-               "(fragmentasi & heave baik); SD > 1.40 = over-confined (energi terkurung ke massa batuan). "
-               "SDOB adalah DIAGNOSTIK DESAIN (bukti konfinemen wajar untuk argumen ke geotek), "
-               "BUKAN prediktor nilai g.")
+    st.caption("6 zona SDOB (diagram Chiappetta/ERG): <0.60 uncontrolled (flyrock hebat); "
+               "0.60-0.92 cratering; 0.92-1.40 controlled (fragmentasi & heave baik, getaran/airblast wajar); "
+               "1.40-1.80 very controlled (tanpa flyrock); 1.80-2.40 minimal surface activity; "
+               ">2.40 insignificant. SDOB adalah DIAGNOSTIK DESAIN (bukti konfinemen wajar untuk "
+               "argumen ke geotek), BUKAN prediktor nilai g.")
     if sdiag is None:
         st.info("Kolom '" + COL_DEPTH + "' / '" + COL_CHG + "' belum lengkap -> diagnostik SDOB dilewati.")
     else:
@@ -732,9 +737,10 @@ with tab4:
         st.dataframe(pd.DataFrame(brows), use_container_width=True, hide_index=True)
         st.write("SDOB aktual: min " + format(sdiag["smin"], ".2f") + " | median "
                  + format(sdiag["smed"], ".2f") + " | maks " + format(sdiag["smax"], ".2f"))
-        st.success("Argumen ke geotek: seluruh desain berada di regime CONTROLLED hingga OVER-CONFINED "
-                   "(tidak ada under-confined) -> secara teori SDOB, desain blasting Pit 3 sudah proper: "
-                   "risiko flyrock/airblast minimal dan energi terarah ke pemecahan batuan.")
+        st.success("Argumen ke geotek: desain berada di zona CONTROLLED s/d MINIMAL SURFACE ACTIVITY "
+                   "(tidak ada satupun uncontrolled/cratering) -> secara teori SDOB Chiappetta, desain "
+                   "blasting Pit 3 sudah proper: risiko flyrock/airblast minimal, energi terarah ke "
+                   "pemecahan batuan. Mayoritas event di zona controlled-very controlled (zona ideal).")
         if not np.isnan(sdiag["corr_g"]):
             st.caption("Korelasi SDOB vs nilai g: r = " + format(sdiag["corr_g"], ".3f")
                        + " (lemah/rancu - g juga dipengaruhi jarak & charge, jadi SDOB TIDAK dipakai "
@@ -750,9 +756,9 @@ with tab4:
                           "nilai g": round(x["g"], 4),
                           "Regime": x["band"].split(":")[0]})
         st.dataframe(pd.DataFrame(trows), use_container_width=True, hide_index=True)
-        st.caption("Definisi & band: Tobin (2013) 'The Importance of Energy Confinement to the Blast "
-                   "Outcome'; Ash (1993); Langefors & Kihlstrom (1978). Band controlled 0.92-1.40 "
-                   "diverifikasi via contoh ERG Industrial (SD=1.27).")
+        st.caption("Definisi & band: diagram Chiappetta/ERG (6 zona); Tobin (2013) 'The Importance of "
+                   "Energy Confinement to the Blast Outcome'; Ash (1993); Langefors & Kihlstrom (1978). "
+                   "Band controlled 0.92-1.40 diverifikasi via contoh ERG Industrial (SD=1.27).")
 
 with tab5:
     st.markdown("Variasi charge (distance tetap = " + format(inp["distance_m"], ".0f") + " m)")

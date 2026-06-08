@@ -95,11 +95,15 @@ SLOPE_FREQ_THRESHOLD = 40.0
 # Verifikasi contoh artikel (stem=5m, d=229mm, rho=1210) -> SD=1.27 (controlled).
 COL_DEPTH     = 'depth_m'
 COL_HOLE_DIA  = 'hole_diameter_mm'
-RHO_EXPLOSIVE = 1150.0   # kg/m^3, emulsi Pit 3
+RHO_EXPLOSIVE = 1150.0   # kg/m^3 (= 1.15 g/cc), emulsi Pit 3
+# 6 zona SDOB sesuai diagram Chiappetta/ERG:
 SDOB_BANDS = [
-    ('Under-confined (<0.92): flyrock & airblast tinggi', 0.0, 0.92),
-    ('Controlled (0.92-1.40): fragmentasi & getaran wajar', 0.92, 1.40),
-    ('Over-confined (>1.40): energi terkurung ke massa batuan', 1.40, float('inf')),
+    ('Uncontrolled (0-0.60): flyrock & airblast hebat', 0.0, 0.60),
+    ('Cratering (0.60-0.92): fragmentasi sangat halus', 0.60, 0.92),
+    ('Controlled (0.92-1.40): fragmentasi baik, getaran/airblast wajar', 0.92, 1.40),
+    ('Very controlled (1.40-1.80): frag lebih kasar, TANPA flyrock', 1.40, 1.80),
+    ('Minimal surface (1.80-2.40): gangguan permukaan kecil', 1.80, 2.40),
+    ('Insignificant (>2.40): efek permukaan tak berarti', 2.40, float('inf')),
 ]
 
 INPUT = {
@@ -642,8 +646,8 @@ if sdiag is not None:
     print('  SDOB aktual: min ' + format(sdiag['smin'], '.2f') + ' | median ' + format(sdiag['smed'], '.2f') + ' | maks ' + format(sdiag['smax'], '.2f'))
     print('  Korelasi SDOB vs g: r = ' + format(sdiag['corr_g'], '.3f') + ' (lemah/rancu -> g jg dipengaruhi jarak & charge;')
     print('    SDOB TIDAK dipakai sbg prediktor g, hanya diagnostik konfinemen).')
-    print('  ARGUMEN GEOTEK: desain berada di regime controlled s/d over-confined (tdk ada under-confined)')
-    print('    -> secara teori SDOB, desain proper: risiko flyrock/airblast minimal, energi ke pemecahan batuan.')
+    print('  ARGUMEN GEOTEK: desain di zona controlled s/d minimal-surface (tdk ada uncontrolled/cratering)')
+    print('    -> secara teori SDOB Chiappetta, desain proper: risiko flyrock/airblast minimal, energi ke batuan.')
     print('  Tabel SDOB per event:')
     print('    #   SDOB   stemming  stem/dia  L_isian   nilai_g   regime')
     for i, x in enumerate(sdiag['rows']):
