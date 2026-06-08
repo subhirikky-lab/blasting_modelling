@@ -483,11 +483,13 @@ sigma_mc = dl["s_e"] if use_loocv_sigma else cal["sigma"]
 design_lambda = dl["table"][design_pct]["emp" if design_method == "empirical" else "norm"]
 
 # ---- Input parameter event ----
+# ---- Input parameter event ----
 with st.sidebar:
     st.header("3. Parameter Event")
     inp = {}
     inp["distance_m"] = st.number_input("Distance (m)", value=float(np.median(df[COL_DIST].values)), min_value=1.0)
-    inp["depth_m"] = st.number_input("Kedalaman lubang (m)", value=float(np.median(df[COL_DEPTH].values)), min_value=1.0)
+    inp["charge_kg"] = st.number_input("Charge per delay (kg)", value=float(np.median(df[COL_CHG].values)), min_value=1.0)
+    inp["depth_m"] = st.number_input("Kedalaman lubang (m)", value=float(np.median(df["depth_m"].values)), min_value=1.0)
     inp["hole_diameter_mm"] = st.number_input("Diameter lubang (mm)", value=200.0, min_value=50.0)
     for p in PARAMS_NUM:
         inp[p] = st.number_input(NICE[p], value=float(np.median(df[p].values)))
