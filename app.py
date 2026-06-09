@@ -527,22 +527,24 @@ inp["scale_distance"] = inp["distance_m"] / np.sqrt(inp["charge_kg"])
 wf_norm = compute_wf(inp, cal) / mean_wf
 g_arr = predict_g_mc(cal, inp["scale_distance"], wf_norm, sigma_mc, int(n_iter))
 g_med = float(np.median(g_arr))
-# MEAN lognormal (expected value) = median x exp(sigma^2/2) -- koreksi retransformasi (Duan 1983).
-# Nilai prediksi paling REALISTIS: tidak optimis (median), tidak pesimis (P90).
+# MEAN lognormal (expected value) = median x exp(sigma^2/2)  -- koreksi retransformasi (Duan 1983).
+# Ini nilai prediksi paling REALISTIS: tidak optimis (median), tidak pesimis (P90).
 g_mean = g_med * _math.exp(sigma_mc ** 2 / 2.0)
+# Pita ketidakpastian mengikuti design percentile yang dipilih user (responsif ke setting).
 lo_pct = (100 - design_pct) / 2.0
 hi_pct = 100 - lo_pct
 g_lo = float(np.percentile(g_arr, lo_pct))
 g_hi = float(np.percentile(g_arr, hi_pct))
 g_design = g_med * design_lambda
+# Probabilitas melampaui ambang (langsung dari sebaran Monte Carlo)
 prob_exceed = 100.0 * float(np.mean(g_arr > g_target))
 is_fault_near = inp["distance_m"] < 100 and str(inp["geological_condt"]) == "Fault"
 
 st.subheader("Hasil Prediksi Getaran (g)")
 c1, c2, c3 = st.columns(3)
-c1.metric("PREDIKSI g (nilai harapan)", format(g_mean, ".5f"), get_status(g_mean))
+c1.metric("Nilai g Prediksi", format(g_mean, ".5f"), get_status(g_mean))
 c2.metric("Probabilitas g > " + format(g_target, ".3f"), format(prob_exceed, ".1f") + "%")
-c3.metric("Design Value (keselamatan)", format(g_design, ".5f"), get_status(g_design))
+c3.metric("Worst Scenario", format(g_design, ".5f"), get_status(g_design))
 
 st.markdown(
     "<div style='padding:12px;border-radius:8px;background:" + STATUS_COLOR[get_status(g_mean)] +
@@ -573,7 +575,7 @@ if not rec["need"]:
 else:
     st.error("DESIGN VALUE " + format(rec["design"], ".5f") + " DI ATAS AMBANG " + format(g_target, ".3f") + " -> perlu mitigasi.")
     if rec["steps"]:
-        st.markdown("**Langkah 1 - tweak operasional (biaya rendah):**")
+        st.markdown("**Langkah 1 - Operasional:**")
         for s in rec["steps"]:
             st.markdown("- " + s)
         st.caption("Design g setelah tweak operasional: " + format(rec["after_ops"], ".5f"))
