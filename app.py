@@ -527,37 +527,43 @@ inp["scale_distance"] = inp["distance_m"] / np.sqrt(inp["charge_kg"])
 wf_norm = compute_wf(inp, cal) / mean_wf
 g_arr = predict_g_mc(cal, inp["scale_distance"], wf_norm, sigma_mc, int(n_iter))
 g_med = float(np.median(g_arr))
-g_q1, g_q3 = float(np.percentile(g_arr, 25)), float(np.percentile(g_arr, 75))
-g_best = float(np.percentile(g_arr, 10))
-g_worst = float(np.percentile(g_arr, 90))
+# MEAN lognormal (expected value) = median x exp(sigma^2/2) -- koreksi retransformasi (Duan 1983).
+# Nilai prediksi paling REALISTIS: tidak optimis (median), tidak pesimis (P90).
+g_mean = g_med * _math.exp(sigma_mc ** 2 / 2.0)
+lo_pct = (100 - design_pct) / 2.0
+hi_pct = 100 - lo_pct
+g_lo = float(np.percentile(g_arr, lo_pct))
+g_hi = float(np.percentile(g_arr, hi_pct))
 g_design = g_med * design_lambda
-# Probabilitas melampaui ambang (langsung dari sebaran Monte Carlo)
 prob_exceed = 100.0 * float(np.mean(g_arr > g_target))
 is_fault_near = inp["distance_m"] < 100 and str(inp["geological_condt"]) == "Fault"
 
 st.subheader("Hasil Prediksi Getaran (g)")
 c1, c2, c3 = st.columns(3)
-c1.metric("Prediksi terbaik (P10)", format(g_best, ".5f"), get_status(g_best))
-c2.metric("Paling mungkin (P50)", format(g_med, ".5f"), get_status(g_med))
-c3.metric("Prediksi terburuk (P90)", format(g_worst, ".5f"), get_status(g_worst))
+c1.metric("PREDIKSI g (nilai harapan)", format(g_mean, ".5f"), get_status(g_mean))
+c2.metric("Probabilitas g > " + format(g_target, ".3f"), format(prob_exceed, ".1f") + "%")
+c3.metric("Design Value (keselamatan)", format(g_design, ".5f"), get_status(g_design))
 
 st.markdown(
-    "<div style='padding:12px;border-radius:8px;background:" + STATUS_COLOR[get_status(g_worst)] +
-    ";color:#000;font-weight:600'>Probabilitas getaran melampaui ambang " + format(g_target, ".3f") +
-    " (G_TARGET) = <span style='font-size:1.3em'>" + format(prob_exceed, ".1f") + "%</span></div>",
+    "<div style='padding:12px;border-radius:8px;background:" + STATUS_COLOR[get_status(g_mean)] +
+    ";color:#000;font-weight:600'>Prediksi getaran realistis = <span style='font-size:1.3em'>"
+    + format(g_mean, ".5f") + " g</span> (" + get_status(g_mean) + ")</div>",
     unsafe_allow_html=True)
 
 st.write("")
-st.write("**Rentang P10-P90 (80% kemungkinan):** " + format(g_best, ".5f") + " ... " + format(g_worst, ".5f") +
+st.write("**Rentang " + str(int(design_pct)) + "% kemungkinan (P" + format(lo_pct, ".0f") + "-P"
+         + format(hi_pct, ".0f") + "):** " + format(g_lo, ".5f") + " ... " + format(g_hi, ".5f") +
          "  |  **WF normalized:** " + format(wf_norm, ".3f") +
          " (" + ("lebih berbahaya" if wf_norm > 1 else "lebih aman") + " dari rata-rata site)")
-st.caption("Untuk keputusan keselamatan gunakan prediksi terburuk (P90) atau DESIGN VALUE = "
-           + format(g_design, ".5f") + " (median x " + format(design_lambda, ".2f") + "). "
-           "P50 adalah nilai tengah - menurut sifat median, ~separuh kejadian aktual bisa di atasnya.")
+st.caption("PREDIKSI g = nilai harapan (mean lognormal = median x exp(sigma^2/2), koreksi Duan 1983) - "
+           "estimator tak-bias yang lebih realistis daripada median (yang cenderung optimis). "
+           "Untuk keputusan keselamatan gunakan Design Value = " + format(g_design, ".5f")
+           + " (median x lambda P" + str(int(design_pct)) + " = " + format(design_lambda, ".2f")
+           + "). Rentang ketidakpastian mengikuti Design percentile yang dipilih.")
 
 if is_fault_near:
     st.warning("REZIM Fault + near-field (<100 m): model cenderung MEREMEHKAN secara struktural -> "
-               "untuk Fault, jadikan P90/DESIGN VALUE sebagai acuan keputusan (bukan P50), beri buffer ekstra.")
+               "untuk Fault, jadikan Design Value sebagai acuan keputusan, beri buffer ekstra.")
 
 # ---- Recommendation ----
 rec = recommend(inp, cal, mean_wf, df, g_target, design_lambda)
