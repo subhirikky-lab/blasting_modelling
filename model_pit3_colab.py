@@ -36,6 +36,7 @@ except Exception:
 import numpy as np
 import pandas as pd
 from scipy import stats
+import math
 
 # =====================================================================
 # [A] KONFIGURASI - HANYA BAGIAN INI YANG PERLU DIUBAH
@@ -325,7 +326,7 @@ def sdob_diagnostics(df, rho=RHO_EXPLOSIVE):
     return dict(rows=rows, n=len(rows), smin=float(sdobs.min()), smax=float(sdobs.max()),
                 smed=float(np.median(sdobs)), band_counts=band_counts, corr_g=corr)
 
-
+def importance_metrics(cal, inp_row, mean_wf):
     weight = cal['weight']
     A = {p: weight[p] for p in ALL_PARAMS}
     B, levels, g_levels = {}, {}, {}
@@ -517,10 +518,12 @@ wf_norm_input = wf_raw_input / mean_wf
 
 g_arr  = predict_g_mc(cal, INPUT['scale_distance'], wf_norm_input, sigma_mc)
 g_pred = float(np.median(g_arr))
-g_q1   = float(np.percentile(g_arr, 25))
-g_q3   = float(np.percentile(g_arr, 75))
-g_best  = float(np.percentile(g_arr, 10))
-g_worst = float(np.percentile(g_arr, 90))
+# MEAN lognormal (nilai harapan) = median x exp(sigma^2/2) -- koreksi retransformasi Duan (1983).
+g_mean = g_pred * math.exp(sigma_mc ** 2 / 2.0)
+lo_pct = (100 - DESIGN_PCT) / 2.0
+hi_pct = 100 - lo_pct
+g_lo = float(np.percentile(g_arr, lo_pct))
+g_hi = float(np.percentile(g_arr, hi_pct))
 g_design = g_pred * design_lambda
 prob_exceed = 100.0 * float(np.mean(g_arr > G_TARGET))   # probabilitas melampaui ambang
 warns = check_extrapolation(INPUT, df)
@@ -544,23 +547,25 @@ print(''); print('' + SEP2)
 print('   HASIL PREDIKSI - ' + format(N_ITER, ',') + ' SIMULASI MONTE CARLO')
 print(SEP2)
 print('')
-print('  Prediksi terbaik  (P10)     :  ' + str(round(g_best, 6)) + '      Status: ' + get_status(g_best))
-print('  Paling mungkin    (P50)     :  ' + str(round(g_pred, 6)) + '      Status: ' + get_status(g_pred))
-print('  Prediksi terburuk (P90)     :  ' + str(round(g_worst, 6)) + '      Status: ' + get_status(g_worst))
+print('  PREDIKSI NILAI g (harapan)  :  ' + str(round(g_mean, 6)) + '      Status: ' + get_status(g_mean))
+print('     = nilai harapan (mean lognormal = median x exp(sigma^2/2), Duan 1983) - realistis,')
+print('       tidak optimis (median) & tidak pesimis (P90).')
+print('  Median (P50)                :  ' + str(round(g_pred, 6)) + '      Status: ' + get_status(g_pred))
 print('  PROBABILITAS g > ' + format(G_TARGET, '.3f') + '     :  ' + format(prob_exceed, '.1f') + '%   <- ukuran risiko paling konkret')
-print('  DESIGN VALUE P' + str(DESIGN_PCT) + ' (x' + format(design_lambda, '.2f') + ') :  ' + str(round(g_design, 6)) + '      Status: ' + get_status(g_design))
+print('  DESIGN VALUE P' + str(DESIGN_PCT) + ' (x' + format(design_lambda, '.2f') + ') :  ' + str(round(g_design, 6)) + '      Status: ' + get_status(g_design) + '  <- keputusan keselamatan')
 print('  (sigma MC = ' + format(sigma_mc, '.3f') + ', ' + ('LOOCV' if USE_LOOCV_SIGMA else 'in-sample') + ')')
 print('')
 print(SEP2)
 print('   RINGKASAN UNTUK RAPAT')
 print(SEP2)
 print('')
-print('  Rentang P10-P90 (80% kemungkinan): ' + str(round(g_best, 6)) + ' - ' + str(round(g_worst, 6)))
+print('  PREDIKSI g (harapan) = ' + str(round(g_mean, 6)) + ' (' + get_status(g_mean) + ')')
+print('  Rentang ' + str(int(DESIGN_PCT)) + '% kemungkinan (P' + format(lo_pct, '.0f') + '-P' + format(hi_pct, '.0f') + '): ' + str(round(g_lo, 6)) + ' - ' + str(round(g_hi, 6)))
 print('  Probabilitas melampaui ambang ' + format(G_TARGET, '.3f') + ' = ' + format(prob_exceed, '.1f') + '%')
-print('  Acuan keputusan keselamatan: P90 = ' + str(round(g_worst, 6)) + ' atau DESIGN = ' + str(round(g_design, 6)))
+print('  Acuan keputusan keselamatan: DESIGN = ' + str(round(g_design, 6)))
 print('  Perkiraan error model (LOOCV): +/- ' + format(mae_loo, '.4f'))
-print('  CATATAN: P50 adalah nilai tengah; menurut sifat median ~separuh kejadian aktual')
-print('           dapat berada di atasnya. Untuk Fault/near-field, pakai P90/DESIGN sbg acuan.')
+print('  Pustaka: Duan (1983) retransformasi; Sobol (1993); Saltelli dkk (2008);')
+print('           Hasanipanah dkk (2017) Monte Carlo getaran blasting.')
 print('')
 
 # --- RECOMMENDATION ENGINE: aktif jika DESIGN g melebihi ambang aman ---
