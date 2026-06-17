@@ -68,8 +68,11 @@ SDOB_BANDS = [
 ]
 
 # ---------------------------------------------------------------------
-# DATABASE INTERNAL (bawaan) - 23 record dari 16 blast aktual Pit 3.
-# Koreksi geologi event May 2026 (data terbaru, valid - tidak dimanipulasi).
+# DATABASE INTERNAL (bawaan) - 26 record dari 19 blast aktual Pit 3 (data terbaru 16 Juni 2026).
+# Record blast 10-row (21 Maret 2025) DIKELUARKAN atas dasar scope: praktik 10-row sudah
+# ditinggalkan (sekarang <=9 row; muck pile jadi freeface baru + bumper energi). Bukan data
+# salah, hanya di luar rezim operasional. Scope model: jarak >=86 m, g <=~0.12, baris <=9.
+# Koreksi geologi event May 2026 (data valid - tidak dimanipulasi).
 # User tidak perlu upload; cukup isi parameter. Repo WAJIB Private.
 # Kolom depth_m & hole_diameter_mm dipakai untuk Scaled Depth of Burial (SDOB).
 # ---------------------------------------------------------------------
@@ -80,7 +83,6 @@ _COLS = ["Amaks (mm/s^s) Maks", "nilai_g", "charge_kg", "distance_m", "tie_up_ty
 _ROWS = [
     [258.11, 0.02631989517, 40, 270, "echelon", 109, 0, 67, 1, "normal", "higher", 3, 8.3, 8, 200],
     [1049, 0.1069682307, 30, 150, "echelon", 109, 0, 176, 1, "normal", "higher", 5, 9.8, 8, 200],
-    [5198, 0.5300484875, 30, 80, "boxcut", 176, 176, 109, 1, "Fault", "higher", 10, 11.3, 8, 200],
     [226.13, 0.02305884272, 30, 300, "echelon", 176, 0, 109, 1, "normal", "higher", 4, 4.5, 8, 200],
     [387, 0.03946301744, 17, 180, "boxcut", 176, 176, 109, 2, "normal", "higher", 9, 49, 8, 200],
     [258.24, 0.02633315148, 50, 285, "echelon", 109, 0, 176, 2, "coal", "higher", 5, 6.4, 8, 200],
