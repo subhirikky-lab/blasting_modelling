@@ -36,7 +36,7 @@ This document is the primary knowledge base and guardrail for AI-assisted techni
 | **SDOB** | Scaled depth of burial / confinement. | Confinement audit for design defensibility. | confirm available source | **Diagnostic only** |
 
 ## 4. Locked Decisions
-- **Dataset:** 26 records / 19 blast events (cutoff: 14 June 2026).
+- **Dataset:** 26 records / 19 blast events (latest record 16 June 2026; dataset frozen for analysis).
 - **Exclusion:** the 10-row record (21 March 2025) is excluded on **scope** grounds — Pit 3 has moved away from single 10-row rounds to staged rounds of <= 9 rows (broken muck acts as an additional free face and energy buffer). This is a scope decision, **not** a data error; the record is valid but out-of-regime.
 - **Operational scope:** distance >= 86 m, g <= ~0.12, rows <= 9.
 - **Pipeline:** Section 2 is final and must not be modified.
