@@ -1,12 +1,16 @@
 # =====================================================================
-# Prediksi Ground Vibration (g) Pit 3
-# Aplikasi web (Streamlit) dari model Hybrid Monte Carlo + Weighted Factor
-# + Residual Ratio + Design Value (P90) + Diagnostik Resonansi + SDOB.
+# Prediksi Ground Vibration (g) Pit 3  -  Tanjung Enim
+# Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value (P90)
+# + Diagnostik Resonansi + SDOB + Dekomposisi Prediksi.
 # Jalankan lokal :  streamlit run app.py
 #
-# REVISI: + Tab "Dekomposisi Prediksi" (Panel B) untuk menampilkan kontribusi
-#           tiap faktor terhadap g event yang diinput (naik/turun vs tipikal site).
-#         + Tab "Faktor" (Panel A) diperkuat: Sobol + Weight berdampingan.
+# DATASET: 27 pengukuran / 20 event blast. Record 10-row (di luar regime) dibuang.
+# KOREKSI: freeface_count yang sebelumnya 0 (salah input) -> 1.
+# BINNING (di DALAM tiap parameter, BUKAN menggabung parameter berbeda):
+#   - row_number -> kelas ordinal 1-3 / 4-7 / >7
+#   - control delay -> 42 ms digabung ke 67 ms (kategori <=67 ms)
+#   - freeface echelon -> 0 / 42-67 / >=109 ms
+#   Dasar teori binning dijelaskan pada tab "Dasar Teori Binning".
 # =====================================================================
 
 import io
@@ -29,15 +33,17 @@ COL_G = "nilai_g"
 COL_DIST = "distance_m"
 COL_CHG = "charge_kg"
 COL_FREQ = "frekuensi_hz"
+COL_DEPTH = "depth_m"
+COL_HOLE_DIA = "hole_diameter_mm"
 
-PARAMS_CAT = ["geological_condt", "tie_up_type", "measuring_elevation"]
-PARAMS_NUM = ["row_number", "controll_ms", "wall_echelon_ms", "freeface_echelon_ms", "freeface_count"]
+PARAMS_CAT = ["geological_condt", "tie_up_type", "measuring_elevation", "row_class", "ffe_binned"]
+PARAMS_NUM = ["controll_binned", "wall_echelon_ms", "freeface_count"]
 ALL_PARAMS = PARAMS_CAT + PARAMS_NUM
-CONTROLLABLE_OPS = ["tie_up_type", "controll_ms", "wall_echelon_ms", "freeface_echelon_ms", "freeface_count"]
+CONTROLLABLE_OPS = ["tie_up_type", "controll_binned", "wall_echelon_ms", "ffe_binned", "freeface_count"]
 
 NICE = {
-    "row_number": "Row Number", "controll_ms": "Control Delay (ms)",
-    "wall_echelon_ms": "Wall Echelon (ms)", "freeface_echelon_ms": "Freeface Echelon (ms)",
+    "row_class": "Row Number (kelas)", "controll_binned": "Control Delay (ms)",
+    "wall_echelon_ms": "Wall Echelon (ms)", "ffe_binned": "Freeface Echelon (ms)",
     "freeface_count": "Freeface Count", "geological_condt": "Geological Condition",
     "tie_up_type": "Tie-up Type", "measuring_elevation": "Measuring Elevation",
 }
@@ -49,9 +55,7 @@ ROCK_NATURAL_FREQ = {"weak": (3, 7), "blocky": (7, 15), "strong": (15, 23)}
 GEO_TO_ROCK = {"coal": "weak", "normal": "blocky", "Fault": "weak"}
 SLOPE_FREQ_THRESHOLD = 40.0
 
-COL_DEPTH = "depth_m"
-COL_HOLE_DIA = "hole_diameter_mm"
-RHO_EXPLOSIVE = 1150.0   # kg/m^3 (= 1.15 g/cc), emulsi Pit 3
+RHO_EXPLOSIVE = 1150.0
 SDOB_BANDS = [
     ("Uncontrolled (0-0.60): flyrock & airblast hebat", 0.0, 0.60),
     ("Cratering (0.60-0.92): fragmentasi sangat halus", 0.60, 0.92),
@@ -62,45 +66,55 @@ SDOB_BANDS = [
 ]
 
 # ---------------------------------------------------------------------
-# DATABASE INTERNAL (bawaan) - 26 record dari 19 blast aktual Pit 3 (data 16 Juni 2026).
-# Record blast 10-row (21 Maret 2025) DIKELUARKAN atas dasar scope: praktik 10-row sudah
-# ditinggalkan (sekarang <=9 row; muck pile jadi freeface baru + bumper energi).
-# Scope model: jarak >=86 m, g <=~0.12, baris <=9. Repo WAJIB Private.
+# DATABASE INTERNAL - 27 pengukuran dari 20 event blast Pit 3 (data 16 Juni 2026).
+# Record 10-row (21 Maret 2025) DIKELUARKAN: ekstrem & high-leverage, di luar fokus regime.
+# freeface_count = 0 (salah input) DIKOREKSI -> 1. Repo WAJIB Private.
 # ---------------------------------------------------------------------
 _COLS = ["Amaks (mm/s^s) Maks", "nilai_g", "charge_kg", "distance_m", "tie_up_type",
          "wall_echelon_ms", "freeface_echelon_ms", "controll_ms", "freeface_count",
          "geological_condt", "measuring_elevation", "row_number", "frekuensi_hz",
          "depth_m", "hole_diameter_mm"]
 _ROWS = [
-    [258.11, 0.02631989517, 40, 270, "echelon", 109, 0, 67, 1, "normal", "higher", 3, 8.3, 8, 200],
-    [1049, 0.1069682307, 30, 150, "echelon", 109, 0, 176, 1, "normal", "higher", 5, 9.8, 8, 200],
-    [226.13, 0.02305884272, 30, 300, "echelon", 176, 0, 109, 1, "normal", "higher", 4, 4.5, 8, 200],
-    [387, 0.03946301744, 17, 180, "boxcut", 176, 176, 109, 2, "normal", "higher", 9, 49, 8, 200],
-    [258.24, 0.02633315148, 50, 285, "echelon", 109, 0, 176, 2, "coal", "higher", 5, 6.4, 8, 200],
-    [226.13, 0.02305884272, 55, 350, "echelon", 109, 0, 176, 2, "coal", "higher", 5, 8.3, 7, 200],
-    [484, 0.04935426471, 57, 324, "echelon", 0, 109, 176, 2, "coal", "higher", 5, 7.9, 8, 200],
-    [306.8, 0.03128489341, 60, 420, "echelon", 0, 67, 109, 1, "coal", "higher", 5, 8.1, 8, 200],
-    [80.65, 0.008224011258, 60, 430, "boxcut", 42, 67, 109, 2, "coal", "higher", 4, 8.6, 8, 200],
-    [161.42, 0.01646025911, 80, 500, "boxcut", 67, 42, 109, 0, "coal", "higher", 5, 3.8, 7.98, 200],
-    [193.7, 0.01975190305, 90, 300, "boxcut", 67, 42, 109, 3, "coal", "normal", 6, 4.2, 8, 200],
-    [1098, 0.1119648402, 82, 160, "boxcut", 67, 42, 109, 2, "normal", "normal", 9, 6.3, 6.34, 200],
-    [936, 0.09544543753, 82, 160, "boxcut", 67, 42, 109, 0, "coal", "lower", 9, 7.3, 6.34, 200],
-    [1195, 0.1218560875, 82, 160, "boxcut", 67, 42, 109, 0, "Fault", "higher", 9, 5.9, 6.34, 200],
-    [96.85, 0.009875952, 51, 454, "boxcut", 67, 42, 109, 2, "Fault", "normal", 7, 14.3, 7.13, 200],
-    [323, 0.032936834, 51, 320, "boxcut", 67, 42, 109, 2, "normal", "normal", 7, 4.9, 7.3, 200],
-    [1130, 0.115227932, 38, 176, "echelon", 42, 0, 67, 1, "Fault", "higher", 4, 8.8, 7.45, 200],
-    [678, 0.069136759, 38, 226, "echelon", 42, 0, 67, 1, "coal", "lower", 4, 12, 7.45, 200],
-    [678, 0.06913675924, 41, 86, "boxcut", 42, 42, 109, 2, "Fault", "higher", 3, 4.1, 7.19, 200],
-    [355, 0.03619992556, 41, 154, "boxcut", 42, 42, 109, 2, "coal", "lower", 3, 7.6, 7.19, 200],
-    [517, 0.05271932821, 41, 193, "echelon", 42, 0, 109, 2, "Fault", "higher", 3, 7.8, 7.74, 200],
-    [589, 0.060061285, 51, 239, "boxcut", 42, 42, 109, 2, "coal", "lower", 3, 9.5, 7.42, 200],
-    [629.54, 0.064195214, 51, 239, "boxcut", 67, 42, 109, 2, "coal", "lower", 3, 10, 7.42, 200],
-    [387.41, 0.039504826, 51, 320, "boxcut", 67, 42, 109, 2, "Fault", "higher", 6, 6.2, 7.42, 200],
-    [290.53, 0.029625815, 51, 320, "boxcut", 42, 42, 109, 2, "Fault", "higher", 6, 3.4, 7.42, 200],
-    [420, 0.04282808095, 72, 311, "boxcut", 42, 67, 109, 3, "Fault", "higher", 5, 6.6, 7.20, 200],
-    [161,0.01641743103, 46, 255, "echelon", 109, 0, 42, 2, "Fault", "lower", 7, 2.9, 6.5, 200]
+    [258.11, 0.02632, 40, 270, "echelon", 109, 0, 67, 1, "normal", "higher", 3, 8.3, 8, 200],
+    [1049, 0.106968, 30, 150, "echelon", 109, 0, 176, 1, "normal", "higher", 5, 9.8, 8, 200],
+    [226.13, 0.023059, 30, 300, "echelon", 176, 0, 109, 1, "normal", "higher", 4, 4.5, 8, 200],
+    [387, 0.039463, 17, 180, "boxcut", 176, 176, 109, 2, "normal", "higher", 9, 49, 8, 200],
+    [258.24, 0.026333, 50, 285, "echelon", 109, 0, 176, 2, "coal", "higher", 5, 6.4, 8, 200],
+    [226.13, 0.023059, 55, 350, "echelon", 109, 0, 176, 2, "coal", "higher", 5, 8.3, 7, 200],
+    [484, 0.049354, 57, 324, "echelon", 0, 109, 176, 2, "coal", "higher", 5, 7.9, 8, 200],
+    [306.8, 0.031285, 60, 420, "echelon", 0, 67, 109, 1, "coal", "higher", 5, 8.1, 8, 200],
+    [80.65, 0.008224, 60, 430, "boxcut", 42, 67, 109, 2, "coal", "higher", 4, 8.6, 8, 200],
+    [161.42, 0.01646, 80, 500, "boxcut", 67, 42, 109, 1, "coal", "higher", 5, 3.8, 7.98, 200],
+    [193.7, 0.019752, 90, 300, "boxcut", 67, 42, 109, 3, "coal", "normal", 6, 4.2, 8, 200],
+    [1098, 0.111965, 82, 160, "boxcut", 67, 42, 109, 2, "normal", "normal", 9, 6.3, 6.34, 200],
+    [936, 0.095445, 82, 160, "boxcut", 67, 42, 109, 1, "coal", "lower", 9, 7.3, 6.34, 200],
+    [1195, 0.121856, 82, 160, "boxcut", 67, 42, 109, 1, "Fault", "higher", 9, 5.9, 6.34, 200],
+    [96.85, 0.009876, 51, 454, "boxcut", 67, 42, 109, 2, "Fault", "normal", 7, 14.3, 7.13, 200],
+    [323, 0.032937, 51, 320, "boxcut", 67, 42, 109, 2, "normal", "normal", 7, 4.9, 7.3, 200],
+    [1130, 0.115228, 38, 176, "echelon", 42, 0, 67, 1, "Fault", "higher", 4, 8.8, 7.45, 200],
+    [678, 0.069137, 38, 226, "echelon", 42, 0, 67, 1, "coal", "lower", 4, 12, 7.45, 200],
+    [589, 0.060061, 51, 239, "boxcut", 42, 42, 109, 2, "coal", "lower", 3, 9.5, 7.42, 200],
+    [629.54, 0.064195, 51, 239, "boxcut", 67, 42, 109, 2, "coal", "lower", 3, 10, 7.42, 200],
+    [387.41, 0.039505, 51, 320, "boxcut", 67, 42, 109, 2, "Fault", "higher", 6, 6.2, 7.42, 200],
+    [290.53, 0.029626, 51, 320, "boxcut", 42, 42, 109, 2, "Fault", "higher", 6, 3.4, 7.42, 200],
+    [678, 0.069137, 41, 86, "boxcut", 42, 42, 109, 2, "Fault", "higher", 3, 4.1, 7.19, 200],
+    [355, 0.0362, 41, 154, "boxcut", 42, 42, 109, 2, "coal", "lower", 3, 7.6, 7.19, 200],
+    [517, 0.052719, 41, 193, "echelon", 42, 0, 109, 2, "Fault", "higher", 3, 7.8, 7.74, 200],
+    [420, 0.042828, 72, 311, "boxcut", 42, 67, 109, 3, "Fault", "normal", 5, 6.6, 7.2, 200],
+    [161, 0.016417, 46, 255, "echelon", 109, 0, 42, 2, "Fault", "lower", 7, 2.9, 6.5, 200],
 ]
 BUILTIN_DATA = [dict(zip(_COLS, r)) for r in _ROWS]
+
+
+def apply_binning(df):
+    """Binning di DALAM tiap parameter (BUKAN menggabung parameter). Freeface Count &
+    Freeface Echelon tetap dua parameter terpisah & independen."""
+    df = df.copy()
+    df["row_class"] = df["row_number"].apply(lambda r: "1-3" if r <= 3 else ("4-7" if r <= 7 else ">7"))
+    df["controll_binned"] = df["controll_ms"].replace({42: 67})
+    df["ffe_binned"] = df["freeface_echelon_ms"].apply(
+        lambda x: "0" if x == 0 else ("42-67" if x <= 67 else ">=109"))
+    return df
 
 
 def get_secret(key):
@@ -127,9 +141,6 @@ def check_password():
     return False
 
 
-# ---------------------------------------------------------------------
-# FUNGSI MODEL
-# ---------------------------------------------------------------------
 def get_status(g):
     for thr, label in STATUS_THRESHOLDS:
         if g <= thr:
@@ -140,16 +151,23 @@ def get_status(g):
 def validate(df):
     df = df.copy()
     df.columns = df.columns.str.strip()
-    required = [COL_AMAKS, COL_G, COL_DIST, COL_CHG] + ALL_PARAMS
-    missing = [c for c in required if c not in df.columns]
+    if "freeface_count" in df.columns:
+        df["freeface_count"] = df["freeface_count"].replace({0: 1})
+    base_required = [COL_AMAKS, COL_G, COL_DIST, COL_CHG,
+                     "geological_condt", "tie_up_type", "measuring_elevation",
+                     "row_number", "controll_ms", "wall_echelon_ms",
+                     "freeface_echelon_ms", "freeface_count"]
+    missing = [c for c in base_required if c not in df.columns]
     if missing:
         raise KeyError("Kolom wajib tidak ada: " + ", ".join(missing))
     df = df.dropna(subset=[COL_AMAKS, COL_DIST, COL_CHG])
     df = df[(df[COL_AMAKS] > 0) & (df[COL_DIST] > 0) & (df[COL_CHG] > 0)].copy()
+    df = df[df["row_number"] < 10].copy()
     if len(df) < 5:
         raise ValueError("Data valid hanya " + str(len(df)) + " baris - terlalu sedikit (min 5).")
     df["scale_distance"] = df[COL_DIST] / np.sqrt(df[COL_CHG])
     df["Amaks_maks"] = df[COL_AMAKS]
+    df = apply_binning(df)
     return df
 
 
@@ -194,7 +212,6 @@ def _nearest_num(d, t):
 
 
 def real_factor_value(p, v, cal):
-    """Real factor untuk level v dari parameter p (string -> exact, numerik -> nearest)."""
     f = cal["real_factor"][p]
     return f.get(v, 1.0) if isinstance(v, str) else _nearest_num(f, v)
 
@@ -239,11 +256,9 @@ def csf_metrics(pairs, w_under=25.0):
     n_under = sum(1 for a, p in pairs if p < a)
     g_range = max(a for a, _ in pairs) - min(a for a, _ in pairs)
     mae = float(np.mean(errs))
-    return dict(mae=mae,
-                nmae=float(mae / g_range) if g_range > 0 else float("nan"),
+    return dict(mae=mae, nmae=float(mae / g_range) if g_range > 0 else float("nan"),
                 csf=float(np.mean([e + w_under * s ** 2 for e, s in zip(errs, short)])),
-                n=len(pairs), n_under=n_under,
-                pct_under=100.0 * n_under / len(pairs),
+                n=len(pairs), n_under=n_under, pct_under=100.0 * n_under / len(pairs),
                 mean_short=float(np.mean(short)))
 
 
@@ -266,7 +281,10 @@ def importance_metrics(cal, inp_row, mean_wf):
     weight = cal["weight"]
     levels, g_levels = {}, {}
     for p in ALL_PARAMS:
-        lv = sorted(cal["real_factor"][p], key=float) if p in PARAMS_NUM else sorted(cal["real_factor"][p], key=str)
+        if p in PARAMS_NUM:
+            lv = sorted(cal["real_factor"][p], key=float)
+        else:
+            lv = sorted(cal["real_factor"][p], key=str)
         gl = []
         for val in lv:
             mod = dict(inp_row)
@@ -284,20 +302,15 @@ def importance_metrics(cal, inp_row, mean_wf):
     return dict(sobol=sobol, levels=levels, g_levels=g_levels)
 
 
-# ---- Panel B: dekomposisi prediksi ----------------------------------
 def site_typical_rf(cal, p):
-    """Real factor 'tipikal site' = rata-rata real factor tiap level dibobot
-    frekuensi kemunculan di dataset. Acuan netral untuk arah naik/turun."""
     rf = cal["real_factor"][p]
     fr = cal["freq"][p]
     return float(sum(rf[k] * fr[k] for k in rf))
 
 
 def decompose_prediction(inp, cal, mean_wf):
-    """Pecah prediksi g event menjadi baseline scaled-distance + kontribusi
-    tiap parameter (naik/turun vs tipikal site)."""
     sd = inp["distance_m"] / np.sqrt(inp["charge_kg"])
-    baseline_g = cal["k"] * sd ** (-cal["n"]) / G_GRAV   # WF_norm = 1
+    baseline_g = cal["k"] * sd ** (-cal["n"]) / G_GRAV
     wf = compute_wf(inp, cal)
     wf_norm = wf / mean_wf
     median_g = baseline_g * wf_norm
@@ -312,8 +325,7 @@ def decompose_prediction(inp, cal, mean_wf):
                             direction=("naik" if dev > 0 else "turun" if dev < 0 else "netral"),
                             weight=cal["weight"][p] * 100.0))
     factors.sort(key=lambda x: -abs(x["deviation_pct"]))
-    return dict(baseline_g=baseline_g, wf_norm=wf_norm, median_g=median_g,
-                sd=sd, factors=factors)
+    return dict(baseline_g=baseline_g, wf_norm=wf_norm, median_g=median_g, sd=sd, factors=factors)
 
 
 def frequency_diagnostics(df):
@@ -332,24 +344,8 @@ def frequency_diagnostics(df):
         c = int(np.sum((freqs > lo) & (freqs <= hi)))
         bands.append(dict(name=name, lo=lo, hi=hi, count=c, pct=100.0 * c / n if n > 0 else 0.0))
     n_slope = int(np.sum(freqs < SLOPE_FREQ_THRESHOLD))
-    geo_audit = {}
-    if "geological_condt" in sub.columns:
-        for geo in sorted(str(x) for x in sub["geological_condt"].dropna().unique()):
-            g_sub = sub[sub["geological_condt"].astype(str) == geo]
-            gf = g_sub[COL_FREQ].values.astype(float)
-            if len(gf) == 0:
-                continue
-            rock = GEO_TO_ROCK.get(geo)
-            rng = ROCK_NATURAL_FREQ.get(rock) if rock else None
-            in_res = int(np.sum(gf <= rng[1])) if rng is not None else 0
-            geo_audit[geo] = dict(rock=rock, rng=rng, n=int(len(gf)), in_res=in_res,
-                                  freqs=sorted(float(x) for x in gf),
-                                  fmin=float(np.min(gf)), fmax=float(np.max(gf)),
-                                  fmed=float(np.median(gf)))
-    return dict(n=n, freqs=sorted(float(x) for x in freqs),
-                fmin=float(np.min(freqs)), fmax=float(np.max(freqs)),
-                fmed=float(np.median(freqs)), bands=bands,
-                n_slope=n_slope, sub=sub, geo_audit=geo_audit)
+    return dict(n=n, fmin=float(np.min(freqs)), fmax=float(np.max(freqs)),
+                fmed=float(np.median(freqs)), bands=bands, n_slope=n_slope)
 
 
 def compute_sdob(charge_kg, depth_m, hole_dia_mm, rho=RHO_EXPLOSIVE):
@@ -432,9 +428,6 @@ def recommend(inp, cal, mean_wf, df, target, design_lambda):
     return out
 
 
-# ---------------------------------------------------------------------
-# CACHE
-# ---------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def build_model(file_bytes, method):
     if file_bytes is None:
@@ -463,7 +456,8 @@ if not check_password():
     st.stop()
 
 st.title("Prediksi Ground Vibration (g) Pit 3")
-st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value + Probabilitas + Diagnostik Resonansi & SDOB")
+st.caption("Hybrid Monte Carlo + Weighted Factor + Residual Ratio + Design Value + Probabilitas "
+           "+ Diagnostik Resonansi & SDOB  |  27 pengukuran / 20 event blast")
 
 with st.sidebar:
     st.header("1. Data")
@@ -480,28 +474,17 @@ with st.sidebar:
                     st.session_state["is_admin"] = False
                     st.error("Password admin salah.")
         if st.session_state.get("is_admin"):
-            st.success("Mode admin aktif - kamu bisa perbarui database.")
+            st.success("Mode admin aktif.")
             up = st.file_uploader("Upload Excel pengganti (format kolom sama)", type=["xlsx", "xls"])
     st.header("2. Pengaturan Model")
-    st.caption("Default di bawah sudah merupakan setelan yang DISARANKAN. "
-               "Biarkan apa adanya kecuali sedang melakukan uji sensitivitas.")
-    method = st.selectbox(
-        "Metode residual ratio", ["geometric", "arithmetic"], index=0,
-        help=("DISARANKAN: geometric. Residual ratio bersifat perkalian (lognormal), "
-              "sehingga geometric mean adalah estimator tengah yang tidak bias."))
-    g_target = st.number_input("Ambang aman g (G_TARGET)", value=0.030, step=0.005, format="%.3f",
-                               help="Batas g yang dianggap aman untuk keputusan. Default 0.030.")
-    design_pct = st.selectbox(
-        "Design percentile", [90, 95, 75], index=0,
-        help=("DISARANKAN: P90. Dengan n=19 event, P90 empiris andal."))
-    design_method = st.selectbox(
-        "Metode Design Value", ["empirical", "normal"], index=0,
-        help=("DISARANKAN: empirical. Mengambil persentil langsung dari sebaran rasio aktual."))
-    use_loocv_sigma = st.checkbox(
-        "Pakai sigma LOOCV (lebih jujur)", value=True,
-        help="DISARANKAN: aktif. Memakai sebaran error leave-one-out, bukan error in-sample.")
-    n_iter = st.select_slider("Iterasi Monte Carlo", options=[2000, 5000, 10000, 20000], value=10000,
-                              help="Jumlah iterasi simulasi. 10000 sudah stabil.")
+    st.caption("Default = setelan DISARANKAN. Biarkan apa adanya kecuali uji sensitivitas.")
+    method = st.selectbox("Metode residual ratio", ["geometric", "arithmetic"], index=0,
+        help="DISARANKAN: geometric (residual ratio bersifat perkalian/lognormal).")
+    g_target = st.number_input("Ambang aman g (G_TARGET)", value=0.030, step=0.005, format="%.3f")
+    design_pct = st.selectbox("Design percentile", [90, 95, 75], index=0, help="DISARANKAN: P90.")
+    design_method = st.selectbox("Metode Design Value", ["empirical", "normal"], index=0, help="DISARANKAN: empirical.")
+    use_loocv_sigma = st.checkbox("Pakai sigma LOOCV (lebih jujur)", value=True)
+    n_iter = st.select_slider("Iterasi Monte Carlo", options=[2000, 5000, 10000, 20000], value=10000)
 
 file_bytes = up.getvalue() if up is not None else None
 try:
@@ -509,12 +492,12 @@ try:
 except Exception as e:
     st.error("Gagal memproses data: " + str(e))
     st.stop()
-st.caption("Sumber data: " + ("file upload (admin)" if up is not None else "database internal bawaan"))
+st.caption("Sumber data: " + ("file upload (admin)" if up is not None else "database internal bawaan")
+           + "  |  N = " + str(len(df)) + " pengukuran")
 
 sigma_mc = dl["s_e"] if use_loocv_sigma else cal["sigma"]
 design_lambda = dl["table"][design_pct]["emp" if design_method == "empirical" else "norm"]
 
-# ---- Input parameter event ----
 with st.sidebar:
     st.header("3. Parameter Event")
     inp = {}
@@ -526,18 +509,28 @@ with st.sidebar:
                                      help="Untuk diagnostik SDOB; tidak mengubah prediksi g.")
     inp["hole_diameter_mm"] = st.number_input("Diameter lubang (mm)", value=_dia_default, min_value=50.0,
                                               help="Untuk diagnostik SDOB.")
-    for p in PARAMS_NUM:
-        inp[p] = st.number_input(NICE[p], value=float(np.median(df[p].values)))
-    for p in PARAMS_CAT:
+    raw_row = st.number_input("Row Number", value=int(np.median(df["row_number"].values)), min_value=1, step=1,
+                              help="Dikelompokkan otomatis ke kelas 1-3 / 4-7 / >7.")
+    _ctrl_opts = sorted(df["controll_ms"].unique().tolist()) if "controll_ms" in df.columns else [67, 109, 176]
+    raw_ctrl = st.selectbox("Control Delay (ms)", _ctrl_opts, help="42 ms otomatis digabung ke 67 ms.")
+    _ffe_opts = sorted(df["freeface_echelon_ms"].unique().tolist()) if "freeface_echelon_ms" in df.columns else [0, 42, 67, 109, 176]
+    raw_ffe = st.selectbox("Freeface Echelon (ms)", _ffe_opts, help="Dikelompokkan ke 0 / 42-67 / >=109.")
+    inp["wall_echelon_ms"] = st.number_input("Wall Echelon (ms)", value=float(np.median(df["wall_echelon_ms"].values)))
+    inp["freeface_count"] = st.number_input("Freeface Count", value=2.0, min_value=1.0, step=1.0,
+                                            help="Jumlah bidang bebas. Parameter TERPISAH dari Freeface Echelon.")
+    for p in ["geological_condt", "tie_up_type", "measuring_elevation"]:
         opts = sorted(str(x) for x in df[p].dropna().unique())
         inp[p] = st.selectbox(NICE[p], opts)
 
-# ---- Prediksi ----
+inp["row_class"] = "1-3" if raw_row <= 3 else ("4-7" if raw_row <= 7 else ">7")
+inp["controll_binned"] = 67 if raw_ctrl == 42 else raw_ctrl
+inp["ffe_binned"] = "0" if raw_ffe == 0 else ("42-67" if raw_ffe <= 67 else ">=109")
+
 inp["scale_distance"] = inp["distance_m"] / np.sqrt(inp["charge_kg"])
 wf_norm = compute_wf(inp, cal) / mean_wf
 g_arr = predict_g_mc(cal, inp["scale_distance"], wf_norm, sigma_mc, int(n_iter))
 g_med = float(np.median(g_arr))
-g_mean = g_med * _math.exp(sigma_mc ** 2 / 2.0)   # mean lognormal (Duan 1983)
+g_mean = g_med * _math.exp(sigma_mc ** 2 / 2.0)
 lo_pct = (100 - design_pct) / 2.0
 hi_pct = 100 - lo_pct
 g_lo = float(np.percentile(g_arr, lo_pct))
@@ -564,18 +557,16 @@ st.write("**Rentang " + str(int(design_pct)) + "% kemungkinan (P" + format(lo_pc
          "  |  **WF normalized:** " + format(wf_norm, ".3f") +
          " (" + ("lebih berbahaya" if wf_norm > 1 else "lebih aman") + " dari rata-rata site)")
 st.caption("PREDIKSI g = nilai harapan (mean lognormal = median x exp(sigma^2/2), koreksi Duan 1983). "
-           "Untuk keputusan keselamatan gunakan Design Value = " + format(g_design, ".5f")
+           "Keputusan keselamatan gunakan Design Value = " + format(g_design, ".5f")
            + " (median x lambda P" + str(int(design_pct)) + " = " + format(design_lambda, ".2f") + ").")
 
 if is_fault_near:
-    st.warning("REZIM Fault + near-field (<100 m): model cenderung MEREMEHKAN secara struktural -> "
-               "untuk Fault, jadikan Design Value sebagai acuan keputusan, beri buffer ekstra.")
+    st.warning("REZIM Fault + near-field (<100 m): model cenderung MEREMEHKAN -> jadikan Design Value acuan.")
 
-# ---- Recommendation ----
 rec = recommend(inp, cal, mean_wf, df, g_target, design_lambda)
 st.subheader("Rekomendasi Keputusan")
 if not rec["need"]:
-    st.success("AMAN - Design value " + format(rec["design"], ".5f") + " di bawah ambang " + format(g_target, ".3f") + ". Tidak perlu perubahan desain.")
+    st.success("AMAN - Design value " + format(rec["design"], ".5f") + " di bawah ambang " + format(g_target, ".3f") + ".")
 else:
     st.error("DESIGN VALUE " + format(rec["design"], ".5f") + " DI ATAS AMBANG " + format(g_target, ".3f") + " -> perlu mitigasi.")
     if rec["steps"]:
@@ -589,78 +580,53 @@ else:
         st.markdown("- Charge: " + format(rec["charge_from"], ".1f") + " kg -> " + format(rec["charge_to"], ".1f") + " kg (turun " + format(turun, ".0f") + "%)")
         if rec["charge_extrapolated"]:
             st.caption("[!] charge target di bawah rentang data -> ekstrapolasi, kurang andal.")
-        st.caption("Trade-off: charge turun memperbaiki getaran TAPI berpotensi memperburuk fragmentasi/produktivitas.")
     st.info("Proyeksi bila saran diterapkan -> median " + format(rec["final_median"], ".5f") + ", DESIGN " + format(rec["final_design"], ".5f"))
 
-# ---- Tabs analisis ----
-tab1, tab_decomp, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Faktor (Sobol + Weight)", "Dekomposisi Prediksi", "Validasi & CSF",
-     "Diagnostik Resonansi", "Diagnostik SDOB", "Sensitivity Charge"])
+tab1, tab_decomp, tab_theory, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Faktor (Sobol + Weight)", "Dekomposisi Prediksi", "Dasar Teori Binning",
+     "Validasi & CSF", "Diagnostik Resonansi", "Diagnostik SDOB", "Sensitivity Charge"])
 
 imp = importance_metrics(cal, inp, mean_wf)
 order = sorted(ALL_PARAMS, key=lambda p: -imp["sobol"][p])
 
-# =====================================================================
-# TAB 1 — PANEL A : Sensitivity diperkuat (Sobol principal + Weight pembanding)
-# =====================================================================
 with tab1:
     st.markdown("### Seberapa besar pengaruh tiap faktor terhadap nilai g?")
-    st.caption(
-        "Inti studi ini: selain scaled distance (jarak + charge), terdapat 8 faktor "
-        "operasional & geologi yang ikut menentukan g. Tabel berikut mengukur kontribusi "
-        "masing-masing dengan dua metrik yang saling melengkapi.")
-
+    st.caption("Selain scaled distance (jarak + charge), 8 faktor operasional & geologi ikut menentukan g.")
     sobol = imp["sobol"]
-    weight_pct = {p: cal["weight"][p] * 100.0 for p in ALL_PARAMS}
-    rows_sens = []
-    for p in order:
-        rows_sens.append({"Faktor": NICE[p],
-                          "Sobol (varians) %": round(sobol[p], 1),
-                          "Weight (rentang) %": round(weight_pct[p], 1),
-                          "Level event ini": str(inp[p])})
+    rows_sens = [{"Faktor": NICE[p], "Sobol (varians) %": round(sobol[p], 1),
+                  "Weight (rentang) %": round(cal["weight"][p] * 100, 1),
+                  "Level event ini": str(inp[p])} for p in order]
     st.dataframe(pd.DataFrame(rows_sens), use_container_width=True, hide_index=True)
-    st.markdown(
-        "- **Sobol (principal):** porsi varians g yang dijelaskan faktor itu di seluruh "
-        "populasi blast - metrik utama, berbasis varians (global).\n"
-        "- **Weight:** porsi faktor itu di dalam weighting factor (berbasis rentang), pembanding.")
-
+    st.markdown("- **Sobol (principal):** porsi varians g (global, berbasis varians).\n"
+                "- **Weight:** porsi faktor di dalam weighting factor (berbasis rentang), pembanding.")
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 12), gridspec_kw={"height_ratios": [1, 1.25]})
-
     def active_level(p):
         if p in PARAMS_NUM:
             keys = np.array([float(x) for x in imp["levels"][p]])
             return imp["levels"][p][int(np.abs(keys - float(inp[p])).argmin())]
         return inp[p]
-
     labels = [NICE[p] + "  [" + str(active_level(p)) + "]" for p in order]
     vals = [sobol[p] for p in order]
     colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(order)))
     bars = ax1.barh(range(len(order)), vals, color=colors, edgecolor="black", linewidth=0.6)
-    ax1.set_yticks(range(len(order)))
-    ax1.set_yticklabels(labels, fontsize=10)
-    ax1.invert_yaxis()
+    ax1.set_yticks(range(len(order))); ax1.set_yticklabels(labels, fontsize=10); ax1.invert_yaxis()
     ax1.set_xlabel("Kontribusi terhadap varians g - indeks Sobol orde-1 (%)")
-    ax1.set_title("Kontribusi Faktor terhadap Varians g (Sobol orde-1)   median g event = " + format(g_med, ".5f"))
+    ax1.set_title("Kontribusi Faktor terhadap Varians g   median g event = " + format(g_med, ".5f"))
     for b, v in zip(bars, vals):
         ax1.text(v + max(vals) * 0.01, b.get_y() + b.get_height() / 2, format(v, ".1f") + "%",
                  va="center", fontsize=9, fontweight="bold")
-    ax1.set_xlim(0, max(vals) * 1.15)
-    ax1.grid(axis="x", alpha=0.3)
-
+    ax1.set_xlim(0, max(vals) * 1.15); ax1.grid(axis="x", alpha=0.3)
     levels, g_levels = imp["levels"], imp["g_levels"]
     max_lv = max(len(levels[p]) for p in order)
     mat = np.full((len(order), max_lv), np.nan)
     for i, p in enumerate(order):
         for j, g in enumerate(g_levels[p]):
             mat[i, j] = g
-    cmap2 = plt.cm.RdYlGn_r.copy()
-    cmap2.set_bad("white")
+    cmap2 = plt.cm.RdYlGn_r.copy(); cmap2.set_bad("white")
     im = ax2.imshow(np.ma.masked_invalid(mat), aspect="auto", cmap=cmap2)
-    ax2.set_yticks(range(len(order)))
-    ax2.set_yticklabels([NICE[p] for p in order], fontsize=10)
-    ax2.set_xticks(range(max_lv))
-    ax2.set_xticklabels(["Lvl " + str(j + 1) for j in range(max_lv)], fontsize=9)
-    ax2.set_title("Heatmap sensitivitas - prediksi g tiap level (merah=tinggi, hijau=rendah, kotak biru=input)")
+    ax2.set_yticks(range(len(order))); ax2.set_yticklabels([NICE[p] for p in order], fontsize=10)
+    ax2.set_xticks(range(max_lv)); ax2.set_xticklabels(["Lvl " + str(j + 1) for j in range(max_lv)], fontsize=9)
+    ax2.set_title("Heatmap sensitivitas - prediksi g tiap level (kotak biru = input)")
     for i, p in enumerate(order):
         act = active_level(p)
         for j, val in enumerate(levels[p]):
@@ -669,59 +635,35 @@ with tab1:
             if val == act:
                 ax2.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, edgecolor="blue", linewidth=2.5))
     fig.colorbar(im, ax=ax2, fraction=0.025, pad=0.02).set_label("Prediksi g")
-    plt.tight_layout()
-    st.pyplot(fig)
+    plt.tight_layout(); st.pyplot(fig)
+    st.info("Catatan jujur: Freeface Count, Wall Echelon, dan Freeface Echelon adalah tiga penggerak utama "
+            "varians g (parameter terpisah & independen). Control delay & geological condition kecil pada varians; "
+            "row number tidak dominan pada regime <=9 row, namun arahnya konsisten (row >7 -> g lebih tinggi). "
+            "Indeks bersifat Sobol-type orde-1 yang diadaptasi ke struktur weighting factor (Sobol 1993; Saltelli dkk. 2008).")
 
-    st.info(
-        "Catatan interpretasi (penting & jujur):\n"
-        "1. Free-face group (Freeface Count + Freeface Echelon) adalah penggerak utama varians g di Pit 3.\n"
-        "2. Control delay terlihat berbobot, namun ~73% data bernilai 109 ms (hampir konstan); "
-        "ini keterbatasan variasi data, BUKAN ketidakpentingan fisik.\n"
-        "3. Row number TIDAK dominan pada rezim operasional saat ini (<=9 row).\n"
-        "4. Geological condition kecil pada varians (Sobol), tetapi arahnya konsisten fisika: "
-        "batuan intact/normal merambatkan energi lebih efisien dibanding zona terkekarkan.\n"
-        "Indeks bersifat Sobol-type orde-1 yang diadaptasi ke struktur weighting factor "
-        "(Sobol 1993; Saltelli dkk. 2008).")
-
-# =====================================================================
-# TAB DEKOMPOSISI — PANEL B : kontribusi tiap faktor untuk event yang diinput
-# =====================================================================
 with tab_decomp:
     st.markdown("### Dekomposisi prediksi g untuk event ini")
-    st.caption("Menjawab: untuk blast yang sedang Anda input, faktor mana yang sedang "
-               "MENDORONG g naik atau turun dibanding kondisi tipikal site Pit 3.")
-
+    st.caption("Faktor mana yang sedang MENDORONG g naik/turun dibanding kondisi tipikal site.")
     dec = decompose_prediction(inp, cal, mean_wf)
-
     c1, c2, c3 = st.columns(3)
     c1.metric("Baseline (scaled distance saja)", format(dec["baseline_g"], ".5f"),
               "jarak " + format(inp["distance_m"], ".0f") + " m, charge " + format(inp["charge_kg"], ".0f") + " kg")
     c2.metric("WF normalized", format(dec["wf_norm"], ".3f"),
               ("lebih berbahaya" if dec["wf_norm"] > 1 else "lebih aman") + " dari rata-rata site")
     c3.metric("Prediksi median (extended)", format(dec["median_g"], ".5f"), get_status(dec["median_g"]))
-
-    st.markdown(
-        "Baseline di atas adalah kontribusi **scaled distance** (jarak + charge) saja. "
-        "Faktor operasional & geologi kemudian menggeser prediksi melalui WF normalized "
-        "(= " + format(dec["wf_norm"], ".3f") + "). Tabel di bawah memerinci arah & besar "
-        "pergeseran tiap faktor relatif terhadap kondisi tipikal site.")
-
-    drows = []
-    for f in dec["factors"]:
-        drows.append({"Faktor": f["nice"], "Level event": str(f["level"]),
-                      "Real factor": round(f["rf"], 3), "Tipikal site": round(f["typical"], 3),
-                      "Mendorong g": (("+" if f["deviation_pct"] >= 0 else "") + format(f["deviation_pct"], ".1f") + "%"),
-                      "Weight %": round(f["weight"], 1)})
+    st.markdown("Baseline = kontribusi **scaled distance** saja. Faktor operasional & geologi menggeser via "
+                "WF normalized (= " + format(dec["wf_norm"], ".3f") + ").")
+    drows = [{"Faktor": f["nice"], "Level event": str(f["level"]), "Real factor": round(f["rf"], 3),
+              "Tipikal site": round(f["typical"], 3),
+              "Mendorong g": (("+" if f["deviation_pct"] >= 0 else "") + format(f["deviation_pct"], ".1f") + "%"),
+              "Weight %": round(f["weight"], 1)} for f in dec["factors"]]
     st.dataframe(pd.DataFrame(drows), use_container_width=True, hide_index=True)
-
     fac_sorted = sorted(dec["factors"], key=lambda x: x["deviation_pct"])
-    names = [f["nice"] for f in fac_sorted]
-    devs = [f["deviation_pct"] for f in fac_sorted]
+    names = [f["nice"] for f in fac_sorted]; devs = [f["deviation_pct"] for f in fac_sorted]
     cols = ["#d73027" if d > 0 else "#1a9850" for d in devs]
     figd, axd = plt.subplots(figsize=(10, 6))
     axd.barh(range(len(names)), devs, color=cols, edgecolor="black", linewidth=0.6)
-    axd.set_yticks(range(len(names)))
-    axd.set_yticklabels(names, fontsize=10)
+    axd.set_yticks(range(len(names))); axd.set_yticklabels(names, fontsize=10)
     axd.axvline(0, color="black", linewidth=1)
     axd.set_xlabel("Pergeseran g relatif terhadap kondisi tipikal site (%)")
     axd.set_title("Dekomposisi: faktor mana yang menaikkan (merah) / menurunkan (hijau) g")
@@ -731,87 +673,90 @@ with tab_decomp:
     axd.grid(axis="x", alpha=0.3)
     pad = max(abs(min(devs)), abs(max(devs))) * 0.25 + 5
     axd.set_xlim(min(devs) - pad, max(devs) + pad)
-    plt.tight_layout()
-    st.pyplot(figd)
+    plt.tight_layout(); st.pyplot(figd)
+    st.info("Bar merah = faktor membuat g LEBIH TINGGI dari tipikal site; hijau = LEBIH RENDAH. "
+            "Dekomposisi bersifat median; ketidakpastian penuh dibaca dari distribusi Monte Carlo & Design Value.")
 
-    st.info(
-        "Cara membaca: bar merah = level faktor itu membuat g event ini LEBIH TINGGI dari tipikal site; "
-        "bar hijau = LEBIH RENDAH. Besarnya bar = persen pergeseran, kolom Weight = peran faktor itu "
-        "dalam model. Faktor dgn pergeseran besar TAPI weight kecil berdampak terbatas pada g akhir, dan "
-        "sebaliknya. Dekomposisi ini bersifat median; ketidakpastian penuh tetap dibaca dari distribusi "
-        "Monte Carlo & Design Value pada panel hasil utama.")
+with tab_theory:
+    st.markdown("### Mengapa dilakukan binning, dan apa dasar teorinya?")
+    st.markdown(
+        "**Masalah: sparse categories (kategori berisi terlalu sedikit data).** Model menghitung "
+        "*real factor* tiap kategori sebagai geometric mean residual ratio anggotanya. Jika kategori "
+        "hanya berisi 1 observasi, geometric mean-nya = nilai tunggal itu, tanpa memisahkan sinyal dari "
+        "noise. Satu event kebetulan bisa membuat kategori tampak sangat berpengaruh, padahal artifact. "
+        "Contoh nyata: control delay 42 ms (n=1) sempat melonjak ~43% kontribusi varians dari satu record.")
+    st.markdown("**Tiga dasar teori:**")
+    st.markdown(
+        "1. **Aturan ukuran sampel per sel (Sturges, 1926).** Jumlah bin wajar k ≈ 1 + 3,3·log₁₀(n); "
+        "untuk n≈27 sekitar 5-6 bin maksimum. Variabel dengan banyak nilai unik tapi sedikit data per "
+        "nilai harus dikelompokkan agar tidak melampaui kapasitas informasi dataset.\n"
+        "2. **Ordinal discretization / equal-frequency binning (Dougherty, Kohavi & Sahami, 1995).** "
+        "Mengubah variabel multi-level jadi sedikit kelas ordinal adalah teknik standar saat data per "
+        "level tipis. Batas dipilih bermakna fisika, sehingga sah dan bukan data dredging.\n"
+        "3. **Analogi klasifikasi geoteknik (Bieniawski RMR, 1989; Barton Q-system).** Parameter kontinu "
+        "(RQD, spasi diskontinuitas) rutin dikelompokkan jadi kelas; preseden domain yang kuat.")
+    st.markdown("**Binning yang diterapkan (di DALAM tiap parameter):**")
+    st.dataframe(pd.DataFrame([
+        {"Parameter": "Row Number", "Kelas": "1-3 / 4-7 / >7",
+         "Justifikasi fisika": "dangkal (free-face relief baik) / menengah / banyak baris (confinement tinggi)"},
+        {"Parameter": "Control Delay", "Kelas": "42 ms -> 67 ms",
+         "Justifikasi fisika": "short delay; kategori 42 ms hanya 1 observasi"},
+        {"Parameter": "Freeface Echelon", "Kelas": "0 / 42-67 / >=109 ms",
+         "Justifikasi fisika": "tanpa echelon / short / long; level >=109 ms jarang"},
+    ]), use_container_width=True, hide_index=True)
+    st.warning("PRINSIP KUNCI: binning dilakukan di dalam masing-masing parameter. Freeface Count dan "
+               "Freeface Echelon TETAP dua parameter terpisah & independen. Yang dirapikan hanya kategori "
+               "internal tiap parameter, BUKAN penggabungan antar parameter.")
+    st.success("Hasil: tidak ada lagi kategori berisi 1 data (semua min n>=2) -> estimasi real factor lebih "
+               "stabil, ranking sensitivitas tidak terdistorsi artifact observasi tunggal. Record 10-row "
+               "ekstrem (high-leverage) dikeluarkan atas dasar regime operasional.")
+    st.caption("Referensi binning: Sturges (1926); Dougherty, Kohavi & Sahami (1995); Bieniawski (1989).")
 
-# =====================================================================
-# TAB 2 — Validasi & CSF
-# =====================================================================
 with tab2:
     cA, cB = st.columns(2)
     cA.markdown("**Kalibrasi**")
-    cA.write("k = " + format(cal["k"], ".2f"))
-    cA.write("n = " + format(cal["n"], ".4f"))
+    cA.write("k = " + format(cal["k"], ".2f")); cA.write("n = " + format(cal["n"], ".4f"))
     cA.write("sigma (in-sample) = " + format(cal["sigma"], ".4f"))
     cA.write("sigma (LOOCV)     = " + format(dl["s_e"], ".4f"))
-    cA.write("R2 = " + format(cal["r2"], ".4f"))
-    cA.write("MEAN_WF = " + format(mean_wf, ".4f"))
+    cA.write("R2 = " + format(cal["r2"], ".4f")); cA.write("MEAN_WF = " + format(mean_wf, ".4f"))
     cB.markdown("**Validasi**")
     cB.write("LOOCV MAE = " + format(mae_loo, ".5f"))
     cB.write("LOOCV NMAE = " + format(csf["nmae"] * 100, ".1f") + "%")
-    cB.write("Underprediction = " + format(csf["pct_under"], ".1f") + "% (" + str(csf["n_under"]) + "/" + str(csf["n"]) + " event)")
-    cB.write("Rata-rata shortfall = " + format(csf["mean_short"], ".5f"))
+    cB.write("Underprediction = " + format(csf["pct_under"], ".1f") + "% (" + str(csf["n_under"]) + "/" + str(csf["n"]) + ")")
     cB.write("CSF (W=25) = " + format(csf["csf"], ".5f"))
-    st.markdown("**Faktor konservatisme (lambda) - underprediction setelah dikoreksi**")
+    st.markdown("**Faktor konservatisme (lambda)**")
     rows = []
     for pct in (75, 90, 95):
         t = dl["table"][pct]
-        rows.append({"Persentil": "P" + str(pct),
-                     "lambda empiris": round(t["emp"], 2), "underpred emp (%)": round(t["under_emp"], 0),
-                     "lambda normal": round(t["norm"], 2), "underpred norm (%)": round(t["under_norm"], 0)})
+        rows.append({"Persentil": "P" + str(pct), "lambda empiris": round(t["emp"], 2),
+                     "underpred emp (%)": round(t["under_emp"], 0), "lambda normal": round(t["norm"], 2),
+                     "underpred norm (%)": round(t["under_norm"], 0)})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.caption("Dipakai: P" + str(design_pct) + " metode " + design_method + " -> lambda = " + format(design_lambda, ".3f"))
-    st.info("Panduan setelan: geometric (residual ratio) + empirical P90 (Design Value) "
-            "adalah konfigurasi yang disarankan untuk keputusan.")
 
-# =====================================================================
-# TAB 3 — Diagnostik Resonansi
-# =====================================================================
 with tab3:
     if fdiag is None:
         st.info("Kolom '" + COL_FREQ + "' belum ada -> diagnostik resonansi dilewati.")
     else:
-        st.markdown("**Diagnostik resonansi (bukan prediksi).** "
-                    "Frekuensi dominan tidak dapat diprediksi dari scale-distance "
-                    "(R2 ~ 0.002, praktis nol). Frekuensi diposisikan sebagai audit pita bahaya dari "
-                    + str(fdiag["n"]) + " event aktual Pit 3.")
+        st.markdown("**Diagnostik resonansi (bukan prediksi).** Frekuensi dominan tidak dapat diprediksi "
+                    "dari scale-distance. Audit pita bahaya dari " + str(fdiag["n"]) + " event aktual.")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Frekuensi dominan - min", format(fdiag["fmin"], ".1f") + " Hz")
+        c1.metric("Freq dominan - min", format(fdiag["fmin"], ".1f") + " Hz")
         c2.metric("median", format(fdiag["fmed"], ".1f") + " Hz")
         c3.metric("maks", format(fdiag["fmax"], ".1f") + " Hz")
         st.markdown("**Distribusi pita Floyd (2008):**")
-        band_rows = [{"Pita": b["name"], "Jumlah event": b["count"], "Porsi (%)": round(b["pct"], 0)} for b in fdiag["bands"]]
-        st.dataframe(pd.DataFrame(band_rows), use_container_width=True, hide_index=True)
-        st.warning(str(fdiag["n_slope"]) + "/" + str(fdiag["n"]) + " event berada di bawah "
+        st.dataframe(pd.DataFrame([{"Pita": b["name"], "Jumlah event": b["count"], "Porsi (%)": round(b["pct"], 0)}
+                                   for b in fdiag["bands"]]), use_container_width=True, hide_index=True)
+        st.warning(str(fdiag["n_slope"]) + "/" + str(fdiag["n"]) + " event di bawah "
                    + format(SLOPE_FREQ_THRESHOLD, ".0f") + " Hz (zona resonansi lereng).")
-        if fdiag["geo_audit"]:
-            st.markdown("**Audit resonansi per kondisi geologi:**")
-            geo_rows = []
-            for geo, a in fdiag["geo_audit"].items():
-                rng_txt = (str(a["rng"][0]) + "-" + str(a["rng"][1]) + " Hz") if a["rng"] else "(tidak dipetakan)"
-                geo_rows.append({"Geologi": geo, "Kelas batuan": str(a["rock"]), "Natural freq": rng_txt,
-                                 "n event": a["n"], "freq min-maks": format(a["fmin"], ".1f") + " - " + format(a["fmax"], ".1f"),
-                                 "Event di zona resonansi": a["in_res"]})
-            st.dataframe(pd.DataFrame(geo_rows), use_container_width=True, hide_index=True)
-        st.caption("Frekuensi tergantung geologi, jarak, dan delay secara kompleks/non-linear (Lucca 2003). "
-                   "Pemetaan geologi->kelas batuan WAJIB diverifikasi dengan uji site.")
+        st.caption("Frekuensi tergantung geologi, jarak, delay secara non-linear (Lucca 2003).")
 
-# =====================================================================
-# TAB 4 — Diagnostik SDOB
-# =====================================================================
 with tab4:
-    st.markdown("**Scaled Depth of Burial (SDOB)** - diagnostik konfinemen energi (ERG/Tobin 2013). "
+    st.markdown("**Scaled Depth of Burial (SDOB)** - diagnostik konfinemen (ERG/Tobin 2013). "
                 "SD = (stemming + 5d)/W10^(1/3). Densitas emulsi = " + format(RHO_EXPLOSIVE, ".0f") + " kg/m3.")
-    st.caption("6 zona Chiappetta/ERG. SDOB adalah DIAGNOSTIK DESAIN, BUKAN prediktor nilai g.")
+    st.caption("DIAGNOSTIK DESAIN, bukan prediktor nilai g.")
     if sdiag is None:
-        st.info("Kolom '" + COL_DEPTH + "' / '" + COL_CHG + "' belum lengkap -> diagnostik SDOB dilewati.")
+        st.info("Kolom depth/charge belum lengkap -> SDOB dilewati.")
     else:
         s_in = compute_sdob(inp["charge_kg"], inp["depth_m"], inp["hole_diameter_mm"])
         if s_in is not None:
@@ -819,29 +764,16 @@ with tab4:
             c1.metric("SDOB event input", format(s_in["sdob"], ".2f"))
             c2.metric("Stemming (dihitung)", format(s_in["stemming"], ".2f") + " m",
                       "L isian = " + format(s_in["charge_len"], ".2f") + " m")
-            c3.metric("Regime konfinemen", s_in["band"].split(":")[0])
-        st.markdown("**Distribusi konfinemen " + str(sdiag["n"]) + " event aktual:**")
-        brows = [{"Regime SDOB": name, "Jumlah event": cnt, "Porsi (%)": round(100.0 * cnt / sdiag["n"], 0)}
-                 for name, cnt in sdiag["band_counts"].items()]
-        st.dataframe(pd.DataFrame(brows), use_container_width=True, hide_index=True)
-        st.write("SDOB aktual: min " + format(sdiag["smin"], ".2f") + " | median "
-                 + format(sdiag["smed"], ".2f") + " | maks " + format(sdiag["smax"], ".2f"))
-        st.success("Argumen ke geotek: desain berada di zona CONTROLLED s/d MINIMAL SURFACE ACTIVITY "
-                   "(tidak ada uncontrolled/cratering) -> desain blasting Pit 3 sudah proper.")
+            c3.metric("Regime", s_in["band"].split(":")[0])
+        st.markdown("**Distribusi konfinemen " + str(sdiag["n"]) + " event:**")
+        st.dataframe(pd.DataFrame([{"Regime SDOB": name, "Jumlah": cnt, "Porsi (%)": round(100.0 * cnt / sdiag["n"], 0)}
+                                   for name, cnt in sdiag["band_counts"].items()]), use_container_width=True, hide_index=True)
+        st.write("SDOB: min " + format(sdiag["smin"], ".2f") + " | median " + format(sdiag["smed"], ".2f")
+                 + " | maks " + format(sdiag["smax"], ".2f"))
+        st.success("Argumen ke geotek: desain di zona CONTROLLED s/d MINIMAL SURFACE ACTIVITY -> desain proper.")
         if not np.isnan(sdiag["corr_g"]):
-            st.caption("Korelasi SDOB vs nilai g: r = " + format(sdiag["corr_g"], ".3f")
-                       + " (lemah - SDOB hanya diagnostik konfinemen, bukan prediktor g).")
-        trows = []
-        for i, x in enumerate(sdiag["rows"]):
-            trows.append({"#": i + 1, "SDOB": round(x["sdob"], 2), "Stemming (m)": round(x["stemming"], 2),
-                          "Stem/Dia": round(x["stem_over_dia"], 1), "L isian (m)": round(x["charge_len"], 2),
-                          "nilai g": round(x["g"], 4), "Regime": x["band"].split(":")[0]})
-        st.dataframe(pd.DataFrame(trows), use_container_width=True, hide_index=True)
-        st.caption("Definisi & band: diagram Chiappetta/ERG (6 zona); Tobin (2013).")
+            st.caption("Korelasi SDOB vs g: r = " + format(sdiag["corr_g"], ".3f") + " (lemah; hanya diagnostik).")
 
-# =====================================================================
-# TAB 5 — Sensitivity Charge
-# =====================================================================
 with tab5:
     st.markdown("Variasi charge (distance tetap = " + format(inp["distance_m"], ".0f") + " m)")
     charges = sorted(set([int(df[COL_CHG].min()), 35, 40, 45, 50, 55, 60, 70, int(df[COL_CHG].max())]))
@@ -856,7 +788,8 @@ with tab5:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 st.divider()
-st.caption("Model kalibrasi otomatis dari data aktual. Design Value = median x lambda untuk keputusan "
-           "keselamatan; mean lognormal untuk nilai harapan. Referensi: Duvall & Fogelson (1962); "
-           "Ambraseys & Hendron (1968); Siskind dkk (1980); Duan (1983); Sobol (1993); Saltelli dkk (2008); "
-           "Floyd (2008); Lucca (2003); Tobin (2013); Hasanipanah dkk (2017).")
+st.caption("Kalibrasi otomatis dari data aktual (27 ukur / 20 event, row-10 dibuang, freeface_count dikoreksi). "
+           "Binning: row(1-3/4-7/>7), control(42->67), freeface echelon(0/42-67/>=109). "
+           "Referensi: Duvall & Fogelson (1962); Ambraseys & Hendron (1968); Duan (1983); Sturges (1926); "
+           "Dougherty dkk (1995); Bieniawski (1989); Sobol (1993); Saltelli dkk (2008); Floyd (2008); "
+           "Lucca (2003); Tobin (2013); Hasanipanah dkk (2017).")
