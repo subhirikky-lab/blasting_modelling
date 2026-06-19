@@ -25,14 +25,14 @@ COL_DIST = "distance_m"
 COL_CHG = "charge_kg"
 COL_FREQ = "frekuensi_hz"
 
-PARAMS_CAT = ["geological_condt", "tie_up_type", "measuring_elevation"]
-PARAMS_NUM = ["row_number", "controll_ms", "wall_echelon_ms", "freeface_echelon_ms", "freeface_count"]
+PARAMS_CAT = ['geological_condt', 'tie_up_type', 'measuring_elevation', 'wall_ech_cat', 'ffe_cat']
+PARAMS_NUM = ['row_number', 'controll_ms', 'freeface_count']
 ALL_PARAMS = PARAMS_CAT + PARAMS_NUM
-CONTROLLABLE_OPS = ["tie_up_type", "controll_ms", "wall_echelon_ms", "freeface_echelon_ms", "freeface_count"]
+CONTROLLABLE_OPS = ['tie_up_type', 'controll_ms', 'wall_ech_cat', 'ffe_cat', 'freeface_count']
 
 NICE = {
     "row_number": "Row Number", "controll_ms": "Control Delay (ms)",
-    "wall_echelon_ms": "Wall Echelon (ms)", "freeface_echelon_ms": "Freeface Echelon (ms)",
+    'wall_ech_cat': 'Wall Echelon (ms)', 'ffe_cat': 'Freeface Echelon (ms)',
     "freeface_count": "Freeface Count", "geological_condt": "Geological Condition",
     "tie_up_type": "Tie-up Type", "measuring_elevation": "Measuring Elevation",
 }
@@ -156,8 +156,8 @@ def validate(df):
     df = df[(df[COL_AMAKS] > 0) & (df[COL_DIST] > 0) & (df[COL_CHG] > 0)].copy()
     if len(df) < 5:
         raise ValueError("Data valid hanya " + str(len(df)) + " baris - terlalu sedikit (min 5).")
-    df["scale_distance"] = df[COL_DIST] / np.sqrt(df[COL_CHG])
-    df["Amaks_maks"] = df[COL_AMAKS]
+    df['wall_ech_cat'] = df['wall_echelon_ms'].apply(lambda x: 'None' if x == 0 else str(int(x)))
+    df['ffe_cat']      = df['freeface_echelon_ms'].apply(lambda x: 'None' if x == 0 else str(int(x)))
     return df
 
 
@@ -525,6 +525,9 @@ with st.sidebar:
     for p in PARAMS_CAT:
         opts = sorted(str(x) for x in df[p].dropna().unique())
         inp[p] = st.selectbox(NICE[p], opts)
+    INPUT['wall_ech_cat'] = 'None' if INPUT['wall_echelon_ms'] == 0 else str(int(INPUT['wall_echelon_ms']))
+    INPUT['ffe_cat']      = 'None' if INPUT['freeface_echelon_ms'] == 0 else str(int(INPUT['freeface_echelon_ms']))
+        
 
 # ---- Prediksi ----
 import math as _math
