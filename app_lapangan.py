@@ -452,18 +452,79 @@ def build_model(file_bytes, method):
 # ---------------------------------------------------------------------
 st.set_page_config(page_title="Prediksi Getaran Pit 3", page_icon="boom", layout="wide")
 
+st.markdown("""
+<style>
+.block-container {padding-top: 2rem;}
+h1 {font-size: 2rem !important;}
+div[data-testid="stMetric"] {
+    background: #f7f9fc; border: 1px solid #e3e8ef;
+    border-radius: 10px; padding: 14px 16px;
+}
+div[data-testid="stMetricLabel"] p {font-size: 0.85rem; color: #4a5568;}
+.hero {
+    background: linear-gradient(90deg,#1e3a5f,#2c5282);
+    color: #fff; padding: 18px 22px; border-radius: 12px; margin-bottom: 6px;
+}
+.hero h2 {margin: 0 0 6px 0; font-size: 1.35rem; color: #fff;}
+.hero p {margin: 0; opacity: .92; font-size: .95rem;}
+.verdict {padding: 18px 22px; border-radius: 12px; font-weight: 600; color: #111;}
+.note {background:#f0f4f8; border-left:4px solid #2c5282; padding:10px 14px;
+       border-radius:6px; font-size:.9rem; color:#2d3748;}
+</style>
+""", unsafe_allow_html=True)
+
 if not check_password():
     st.stop()
 
-st.title("Prediksi Ground Vibration (g) Pit 3 - Versi Lapangan")
-st.caption("Untuk kebutuhan operasional harian Pit 3. Upload Excel data terbaru -> model dikalibrasi ulang otomatis. "
-           "Logika numerik identik dengan versi paper (app.py di repo yang sama).")
+st.markdown("""
+<div class="hero">
+  <h2>Prediksi Getaran Tanah Akibat Peledakan &mdash; Pit 3</h2>
+  <p>Isi rencana peledakan di panel kiri. Aplikasi menghitung perkiraan getaran
+  dan seberapa besar peluangnya melewati batas aman.</p>
+</div>
+""", unsafe_allow_html=True)
+
+with st.expander("Baru pertama pakai? Baca ini dulu"):
+    st.markdown("""
+**Apa yang dihitung aplikasi ini?**
+Getaran tanah dari peledakan, dinyatakan dalam satuan **g** (percepatan). Makin besar
+nilai g, makin kuat lereng terguncang.
+
+**Batas aman = 0.030 g.** Angka ini ditetapkan tim geoteknik untuk menjaga lereng akhir
+dan kanal. Peledakan diusahakan tetap di bawah angka ini.
+
+**Tiga angka yang muncul di hasil:**
+
+| Angka | Artinya |
+|---|---|
+| Nilai g Prediksi | Perkiraan paling masuk akal untuk rencana ini |
+| Probabilitas | Peluang getaran melewati batas aman |
+| Worst Scenario | Angka konservatif untuk keputusan keselamatan |
+
+**Cara pakai:** isi jarak, isian bahan peledak, dan kondisi lapangan di panel kiri.
+Hasil berubah otomatis. Kalau hasil di atas batas, aplikasi memberi saran perbaikan desain.
+
+Perhitungan dikalibrasi dari **27 pengukuran pada 20 event peledakan** di Pit 3.
+""")
 
 with st.sidebar:
-    st.header("1. Data")
-    st.caption("Upload Excel data terbaru (setiap upload baru = kalibrasi ulang otomatis).")
-    up = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx", "xls"])
-    st.header("2. Pengaturan Model")
+    st.header("1. Sumber Data")
+    st.caption("Aplikasi memakai database internal (bawaan). User cukup mengisi parameter di bawah.")
+    up = None
+    admin_pw = get_secret("admin_password")
+    if admin_pw:
+        with st.expander("Login admin (khusus pengelola)"):
+            entered_admin = st.text_input("Password admin", type="password", key="admin_pw_input")
+            if entered_admin:
+                if entered_admin == admin_pw:
+                    st.session_state["is_admin"] = True
+                else:
+                    st.session_state["is_admin"] = False
+                    st.error("Password admin salah.")
+        if st.session_state.get("is_admin"):
+            st.success("Mode admin aktif.")
+            up = st.file_uploader("Upload Excel pengganti (format kolom sama)", type=["xlsx", "xls"])
+    st.header("2. Pengaturan Model (lanjutan)")
     st.caption("Default = setelan DISARANKAN. Biarkan apa adanya kecuali uji sensitivitas.")
     method = st.selectbox("Metode residual ratio", ["geometric", "arithmetic"], index=0,
         help="DISARANKAN: geometric (residual ratio bersifat perkalian/lognormal).")
@@ -473,25 +534,20 @@ with st.sidebar:
     use_loocv_sigma = st.checkbox("Pakai sigma LOOCV (lebih jujur)", value=True)
     n_iter = st.select_slider("Iterasi Monte Carlo", options=[2000, 5000, 10000, 20000], value=10000)
 
-if up is None:
-    st.info("Silakan upload Excel data pengukuran untuk memulai. "
-            "Kolom wajib: Amaks (mm/s^s) Maks, nilai_g, distance_m, charge_kg, "
-            "geological_condt, tie_up_type, measuring_elevation, row_number, "
-            "controll_ms, wall_echelon_ms, freeface_echelon_ms, freeface_count, depth_m, hole_diameter_mm.")
-    st.stop()
-
+file_bytes = up.getvalue() if up is not None else None
 try:
-    df, cal, mean_wf, mae_loo, csf, dl, fdiag, sdiag = build_model(up.getvalue(), method)
+    df, cal, mean_wf, mae_loo, csf, dl, fdiag, sdiag = build_model(file_bytes, method)
 except Exception as e:
     st.error("Gagal memproses data: " + str(e))
     st.stop()
-st.caption("Sumber data: file upload  |  N = " + str(len(df)) + " pengukuran")
+st.caption("Sumber data: " + ("file upload (admin)" if up is not None else "database internal bawaan")
+           + "  |  N = " + str(len(df)) + " pengukuran")
 
 sigma_mc = dl["s_e"] if use_loocv_sigma else cal["sigma"]
 design_lambda = dl["table"][design_pct]["emp" if design_method == "empirical" else "norm"]
 
 with st.sidebar:
-    st.header("3. Parameter Event")
+    st.header("3. Rencana Peledakan")
     inp = {}
     inp["distance_m"] = st.number_input("Distance (m)", value=float(np.median(df[COL_DIST].values)), min_value=1.0)
     inp["charge_kg"] = st.number_input("Charge per delay (kg)", value=float(np.median(df[COL_CHG].values)), min_value=1.0)
@@ -531,17 +587,24 @@ g_design = g_med * design_lambda
 prob_exceed = 100.0 * float(np.mean(g_arr > g_target))
 is_fault_near = inp["distance_m"] < 100 and str(inp["geological_condt"]) == "Fault"
 
-st.subheader("Hasil Prediksi Getaran (g)")
+st.subheader("Hasil Prediksi")
 c1, c2, c3 = st.columns(3)
-c1.metric("Nilai g Prediksi", format(g_mean, ".5f"), get_status(g_mean))
-c2.metric("Probabilitas g > " + format(g_target, ".3f"), format(prob_exceed, ".1f") + "%")
-c3.metric("Worst Scenario", format(g_design, ".5f"), get_status(g_design))
+c1.metric("Perkiraan getaran (g)", format(g_mean, ".5f"), get_status(g_mean),
+          help="Nilai yang paling mungkin terjadi untuk rencana peledakan ini.")
+c2.metric("Peluang lewat batas " + format(g_target, ".3f"), format(prob_exceed, ".1f") + "%",
+          help="Dari 100 kali peledakan dengan desain seperti ini, sekian kali diperkirakan melewati batas aman.")
+c3.metric("Angka untuk keputusan (P90)", format(g_design, ".5f"), get_status(g_design),
+          help="Angka konservatif. Dipakai tim geoteknik untuk memutuskan aman atau tidak.")
 
+st.progress(min(prob_exceed / 100.0, 1.0),
+            text="Peluang melewati batas aman: " + format(prob_exceed, ".0f") + " dari 100 peledakan")
+
+_verdict = ("Di bawah batas aman" if g_mean <= g_target else "Di atas batas aman")
 st.markdown(
-    "<div style='padding:12px;border-radius:8px;background:" + STATUS_COLOR[get_status(g_mean)] +
-    ";color:#000;font-weight:600'>Prediksi getaran realistis = <span style='font-size:1.3em'>"
-    + format(g_mean, ".5f") + " g</span> (" + get_status(g_mean) + ")</div>",
-    unsafe_allow_html=True)
+    "<div class='verdict' style='background:" + STATUS_COLOR[get_status(g_mean)] + "'>"
+    + "Perkiraan getaran <span style='font-size:1.4em'>" + format(g_mean, ".5f") + " g</span>"
+    + " &nbsp;&mdash;&nbsp; " + _verdict + " (" + format(g_target, ".3f") + " g)"
+    + "</div>", unsafe_allow_html=True)
 
 st.write("")
 st.write("**Rentang " + str(int(design_pct)) + "% kemungkinan (P" + format(lo_pct, ".0f") + "-P"
@@ -575,8 +638,8 @@ else:
     st.info("Proyeksi bila saran diterapkan -> median " + format(rec["final_median"], ".5f") + ", DESIGN " + format(rec["final_design"], ".5f"))
 
 tab1, tab_decomp, tab_theory, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Faktor (Sobol + Weight)", "Dekomposisi Prediksi", "Dasar Teori Binning",
-     "Validasi & CSF", "Diagnostik Resonansi", "Diagnostik SDOB", "Sensitivity Charge"])
+    ["Faktor paling berpengaruh", "Kenapa hasilnya segini?", "Dasar pengelompokan data",
+     "Seberapa akurat model", "Frekuensi getaran", "Konfinemen (SDOB)", "Kalau charge diubah"])
 
 imp = importance_metrics(cal, inp, mean_wf)
 order = sorted(ALL_PARAMS, key=lambda p: -imp["sobol"][p])
@@ -780,7 +843,18 @@ with tab5:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 st.divider()
-st.caption("Kalibrasi otomatis dari data yang di-upload. Untuk versi paper terkunci (27 data), lihat app.py. "
+with st.expander("Kamus istilah"):
+    st.markdown("""
+- **g** &mdash; satuan percepatan getaran. Batas aman Pit 3 = 0.030 g.
+- **Scaled distance** &mdash; jarak dibagi akar isian bahan peledak. Dasar perhitungan getaran.
+- **Charge per delay** &mdash; jumlah bahan peledak yang meledak dalam satu waktu tunda.
+- **Freeface** &mdash; bidang bebas. Arah tempat energi ledakan terlepas.
+- **Echelon** &mdash; pola tunda antar lubang, dibuat agar gelombang tidak menumpuk.
+- **Monte Carlo** &mdash; simulasi 10.000 kali untuk melihat sebaran kemungkinan hasil.
+- **P90 / Worst Scenario** &mdash; angka konservatif; 9 dari 10 kali hasil nyata di bawah angka ini.
+- **LOOCV** &mdash; cara uji ketelitian model memakai data yang belum pernah dilihat model.
+""")
+st.caption("Kalibrasi otomatis dari data aktual (27 ukur / 20 event, row-10 dibuang, freeface_count dikoreksi). "
            "Binning: row(1-3/4-7/>7), control(42->67), freeface echelon(0/42-67/>=109). "
            "Referensi: Duvall & Fogelson (1962); Ambraseys & Hendron (1968); Duan (1983); Sturges (1926); "
            "Dougherty dkk (1995); Bieniawski (1989); Sobol (1993); Saltelli dkk (2008); Floyd (2008); "
