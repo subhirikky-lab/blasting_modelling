@@ -509,21 +509,11 @@ Perhitungan dikalibrasi dari **27 pengukuran pada 20 event peledakan** di Pit 3.
 
 with st.sidebar:
     st.header("1. Sumber Data")
-    st.caption("Aplikasi memakai database internal (bawaan). User cukup mengisi parameter di bawah.")
-    up = None
-    admin_pw = get_secret("admin_password")
-    if admin_pw:
-        with st.expander("Login admin (khusus pengelola)"):
-            entered_admin = st.text_input("Password admin", type="password", key="admin_pw_input")
-            if entered_admin:
-                if entered_admin == admin_pw:
-                    st.session_state["is_admin"] = True
-                else:
-                    st.session_state["is_admin"] = False
-                    st.error("Password admin salah.")
-        if st.session_state.get("is_admin"):
-            st.success("Mode admin aktif.")
-            up = st.file_uploader("Upload Excel pengganti (format kolom sama)", type=["xlsx", "xls"])
+    st.caption("Kosongkan untuk memakai data bawaan (27 pengukuran). "
+               "Upload Excel untuk memakai data terbaru.")
+    up = st.file_uploader("Upload Excel data terbaru", type=["xlsx", "xls"],
+                          help="Format kolom harus sama dengan file kalibrasi. "
+                               "Setiap upload baru mengulang kalibrasi otomatis.")
     st.header("2. Pengaturan Model (lanjutan)")
     st.caption("Default = setelan DISARANKAN. Biarkan apa adanya kecuali uji sensitivitas.")
     method = st.selectbox("Metode residual ratio", ["geometric", "arithmetic"], index=0,
@@ -587,24 +577,22 @@ g_design = g_med * design_lambda
 prob_exceed = 100.0 * float(np.mean(g_arr > g_target))
 is_fault_near = inp["distance_m"] < 100 and str(inp["geological_condt"]) == "Fault"
 
-st.subheader("Hasil Prediksi")
+st.subheader("Hasil Prediksi Getaran (g)")
 c1, c2, c3 = st.columns(3)
-c1.metric("Perkiraan getaran (g)", format(g_mean, ".5f"), get_status(g_mean),
+c1.metric("Nilai g Prediksi", format(g_mean, ".5f"), get_status(g_mean),
           help="Nilai yang paling mungkin terjadi untuk rencana peledakan ini.")
-c2.metric("Peluang lewat batas " + format(g_target, ".3f"), format(prob_exceed, ".1f") + "%",
+c2.metric("Probabilitas g > " + format(g_target, ".3f"), format(prob_exceed, ".1f") + "%",
           help="Dari 100 kali peledakan dengan desain seperti ini, sekian kali diperkirakan melewati batas aman.")
-c3.metric("Angka untuk keputusan (P90)", format(g_design, ".5f"), get_status(g_design),
+c3.metric("Worst Scenario", format(g_design, ".5f"), get_status(g_design),
           help="Angka konservatif. Dipakai tim geoteknik untuk memutuskan aman atau tidak.")
 
 st.progress(min(prob_exceed / 100.0, 1.0),
             text="Peluang melewati batas aman: " + format(prob_exceed, ".0f") + " dari 100 peledakan")
 
-_verdict = ("Di bawah batas aman" if g_mean <= g_target else "Di atas batas aman")
 st.markdown(
     "<div class='verdict' style='background:" + STATUS_COLOR[get_status(g_mean)] + "'>"
-    + "Perkiraan getaran <span style='font-size:1.4em'>" + format(g_mean, ".5f") + " g</span>"
-    + " &nbsp;&mdash;&nbsp; " + _verdict + " (" + format(g_target, ".3f") + " g)"
-    + "</div>", unsafe_allow_html=True)
+    + "Prediksi getaran realistis = <span style='font-size:1.4em'>" + format(g_mean, ".5f")
+    + " g</span> (" + get_status(g_mean) + ")</div>", unsafe_allow_html=True)
 
 st.write("")
 st.write("**Rentang " + str(int(design_pct)) + "% kemungkinan (P" + format(lo_pct, ".0f") + "-P"
