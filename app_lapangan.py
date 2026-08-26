@@ -457,10 +457,11 @@ st.markdown("""
 .block-container {padding-top: 2rem;}
 h1 {font-size: 2rem !important;}
 div[data-testid="stMetric"] {
-    background: #f7f9fc; border: 1px solid #e3e8ef;
+    background: rgba(128,128,128,0.10);
+    border: 1px solid rgba(128,128,128,0.35);
     border-radius: 10px; padding: 14px 16px;
 }
-div[data-testid="stMetricLabel"] p {font-size: 0.85rem; color: #4a5568;}
+div[data-testid="stMetricLabel"] p {font-size: 0.85rem; opacity: 0.85;}
 .hero {
     background: linear-gradient(90deg,#1e3a5f,#2c5282);
     color: #fff; padding: 18px 22px; border-radius: 12px; margin-bottom: 6px;
@@ -468,8 +469,8 @@ div[data-testid="stMetricLabel"] p {font-size: 0.85rem; color: #4a5568;}
 .hero h2 {margin: 0 0 6px 0; font-size: 1.35rem; color: #fff;}
 .hero p {margin: 0; opacity: .92; font-size: .95rem;}
 .verdict {padding: 18px 22px; border-radius: 12px; font-weight: 600; color: #111;}
-.note {background:#f0f4f8; border-left:4px solid #2c5282; padding:10px 14px;
-       border-radius:6px; font-size:.9rem; color:#2d3748;}
+.note {background:rgba(128,128,128,0.10); border-left:4px solid #4a90d9;
+       padding:10px 14px; border-radius:6px; font-size:.9rem;}
 </style>
 """, unsafe_allow_html=True)
 
