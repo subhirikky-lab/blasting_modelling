@@ -302,7 +302,7 @@ print(''); print(SEP)
 print('   KALIBRASI DARI DATA AKTUAL')
 print(SEP)
 
-df_raw = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME)
+df_raw = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME, engine='openpyxl')
 df  = validate(df_raw)
 cal = calibrate(df, METHOD)
 df  = cal['df']
