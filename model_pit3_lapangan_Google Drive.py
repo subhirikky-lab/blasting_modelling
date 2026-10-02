@@ -32,7 +32,7 @@ from scipy import stats
 # [A] KONFIGURASI - HANYA BAGIAN INI YANG PERLU DIUBAH
 # =====================================================================
 
-DATA_FILE  = r'/content/drive/MyDrive/DATA_BLASTING/nilai_g_pit3.xlsx'
+DATA_FILE  = r'https://docs.google.com/spreadsheets/d/1xwJz5xrysYvEPK7lZMweL5rAAbBFkNA1/edit?usp=sharing&ouid=106707184925055616807&rtpof=true&sd=true'
 SHEET_NAME = 'Sheet1'
 
 METHOD      = 'geometric'   # geometric = disarankan
