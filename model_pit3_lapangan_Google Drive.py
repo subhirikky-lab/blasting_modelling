@@ -1,5 +1,5 @@
 # =====================================================================
-# PREDIKSI GETARAN PIT 3 - VERSI LAPANGAN (Colab)
+# PREDIKSI GETARAN PIT 3 - VERSI LAPANGAN (Streamlit / Server)
 # =====================================================================
 # Logika NUMERIK IDENTIK dengan app.py (versi paper):
 #   - binning di dalam tiap parameter (row_class, controll_binned, ffe_binned)
@@ -11,9 +11,6 @@
 #
 # BEDA dengan app.py: script ini BACA EXCEL dari Google Drive.
 # Tambah data baru di Excel -> jalankan ulang -> semua terhitung ulang.
-#
-# CATATAN: app.py di GitHub (27 data) TETAP untuk paper. Script ini
-# untuk kebutuhan lapangan dengan data yang terus bertambah.
 # =====================================================================
 
 try:
@@ -27,12 +24,17 @@ import math
 import numpy as np
 import pandas as pd
 from scipy import stats
+import requests  # Ditambahkan untuk download file
+import io        # Ditambahkan untuk membaca file di memory
 
 # =====================================================================
 # [A] KONFIGURASI - HANYA BAGIAN INI YANG PERLU DIUBAH
 # =====================================================================
 
-DATA_FILE  = r'https://docs.google.com/spreadsheets/d/1xwJz5xrysYvEPK7lZMweL5rAAbBFkNA1/edit?usp=sharing&ouid=106707184925055616807&rtpof=true&sd=true'
+# Gunakan ID File dari link Google Drive Anda
+FILE_ID = '1xwJz5xrysYvEPK7lZMweL5rAAbBFkNA1'
+# Format URL khusus untuk memaksa download/export ke Excel
+DOWNLOAD_URL = f'https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx'
 SHEET_NAME = 'Sheet1'
 
 METHOD      = 'geometric'   # geometric = disarankan
@@ -85,21 +87,17 @@ STATUS_THRESHOLDS = [(0.020, 'EXCELLENT'), (0.030, 'SAFE'), (0.100, 'MODERATE'),
 SEP  = '=' * 66
 SEP2 = '-' * 66
 
-
 def get_status(g):
     for thr, label in STATUS_THRESHOLDS:
         if g <= thr:
             return label
     return 'EXTREMELY RISKY'
 
-
 # =====================================================================
 # [C] BINNING & VALIDASI (identik app.py)
 # =====================================================================
 
 def apply_binning(df):
-    """Binning di DALAM tiap parameter. Freeface Count & Freeface Echelon
-    TETAP dua parameter terpisah & independen."""
     df = df.copy()
     df['row_class'] = df['row_number'].apply(
         lambda r: '1-3' if r <= 3 else ('4-7' if r <= 7 else '>7'))
@@ -107,7 +105,6 @@ def apply_binning(df):
     df['ffe_binned'] = df['freeface_echelon_ms'].apply(
         lambda x: '0' if x == 0 else ('42-67' if x <= 67 else '>=109'))
     return df
-
 
 def validate(df):
     df = df.copy()
@@ -123,7 +120,7 @@ def validate(df):
     n0 = len(df)
     df = df.dropna(subset=[COL_AMAKS, COL_DIST, COL_CHG])
     df = df[(df[COL_AMAKS] > 0) & (df[COL_DIST] > 0) & (df[COL_CHG] > 0)].copy()
-    df = df[df['row_number'] < 10].copy()     # record 10-row dibuang
+    df = df[df['row_number'] < 10].copy()
     if len(df) < 5:
         raise ValueError('Data valid hanya ' + str(len(df)) + ' baris - terlalu sedikit.')
     if n0 - len(df) > 0:
@@ -131,7 +128,6 @@ def validate(df):
     df['scale_distance'] = df[COL_DIST] / np.sqrt(df[COL_CHG])
     df['Amaks_maks'] = df[COL_AMAKS]
     return apply_binning(df)
-
 
 # =====================================================================
 # [D] KALIBRASI & PREDIKSI (identik app.py)
@@ -142,7 +138,6 @@ def _aggregate(values, method):
     if method == 'geometric':
         return float(np.exp(np.mean(np.log(arr))))
     return float(np.mean(arr))
-
 
 def calibrate(df, method=METHOD):
     ln_a  = np.log(df['Amaks_maks'].values)
@@ -170,35 +165,28 @@ def calibrate(df, method=METHOD):
     return dict(k=k, n=n, sigma=sigma, r2=r_sq, real_factor=real_factor,
                 weight=weight, counts=counts, freq=freq, df=df)
 
-
 def _nearest_num(d, t):
     keys = np.array([float(x) for x in d.keys()])
     return list(d.values())[int(np.abs(keys - float(t)).argmin())]
-
 
 def real_factor_value(p, v, cal):
     f = cal['real_factor'][p]
     return f.get(v, 1.0) if isinstance(v, str) else _nearest_num(f, v)
 
-
 def compute_wf(row, cal):
     return sum(real_factor_value(p, row[p], cal) * cal['weight'][p] for p in ALL_PARAMS)
 
-
 def mean_wf_of(df, cal):
     return float(np.mean([compute_wf(r, cal) for _, r in df.iterrows()]))
-
 
 def median_g_event(inp, cal, mean_wf):
     sd = inp['distance_m'] / np.sqrt(inp['charge_kg'])
     return cal['k'] * sd ** (-cal['n']) * (compute_wf(inp, cal) / mean_wf) / G_GRAV
 
-
 def predict_g_mc(cal, sd, wf_norm, sigma, n_iter=N_ITER, seed=SEED):
     rng = np.random.default_rng(seed)
     err = rng.normal(0.0, sigma, n_iter)
     return cal['k'] * (sd ** (-cal['n'])) * np.exp(err) * wf_norm / G_GRAV
-
 
 def loocv_predictions(df, method=METHOD):
     pairs = []
@@ -211,7 +199,6 @@ def loocv_predictions(df, method=METHOD):
         pairs.append((float(test[COL_G]), float(gp)))
     return pairs
 
-
 def design_limits(pairs):
     ratios = np.array([a / p for a, p in pairs if p > 0])
     logr = np.log(ratios)
@@ -220,7 +207,6 @@ def design_limits(pairs):
     for pct in (75, 90, 95):
         table[pct] = dict(emp=float(np.percentile(ratios, pct)))
     return dict(mu_e=mu_e, s_e=s_e, table=table)
-
 
 def importance_metrics(cal, inp_row, mean_wf):
     weight = cal['weight']
@@ -245,7 +231,6 @@ def importance_metrics(cal, inp_row, mean_wf):
     so = sum(oat_raw.values())
     oat = {p: (oat_raw[p] / so * 100 if so > 0 else 0.0) for p in ALL_PARAMS}
     return dict(sobol=sobol, oat=oat, levels=levels, g_levels=g_levels)
-
 
 def recommend(inp, cal, mean_wf, df, target, design_lambda):
     g_med = median_g_event(inp, cal, mean_wf)
@@ -293,7 +278,6 @@ def recommend(inp, cal, mean_wf, df, target, design_lambda):
         print('     Tidak perlu - target tercapai hanya dengan tweak operasional.')
     print('')
 
-
 # =====================================================================
 # [E] JALANKAN
 # =====================================================================
@@ -302,7 +286,20 @@ print(''); print(SEP)
 print('   KALIBRASI DARI DATA AKTUAL')
 print(SEP)
 
-df_raw = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME, engine='openpyxl')
+try:
+    print(f'  [INFO] Mengunduh data dari Google Drive (ID: {FILE_ID})...')
+    response = requests.get(DOWNLOAD_URL)
+    response.raise_for_status() # Cek apakah ada error HTTP (misal: 404 atau 403 Forbidden)
+    
+    # Membaca data langsung dari memory (BytesIO) menggunakan pandas
+    df_raw = pd.read_excel(io.BytesIO(response.content), sheet_name=SHEET_NAME, engine='openpyxl')
+    print('  [INFO] Berhasil mengunduh dan membaca data Excel.')
+except Exception as e:
+    print(f'\n[ERROR FATAL] Gagal mengambil data dari Google Drive.')
+    print(f'Penyebab: {e}')
+    print(f'Solusi: Pastikan file di Google Drive sudah di-setting "Anyone with the link can view".')
+    exit() # Menghentikan script jika gagal download
+
 df  = validate(df_raw)
 cal = calibrate(df, METHOD)
 df  = cal['df']
@@ -314,11 +311,11 @@ g_range = df[COL_G].max() - df[COL_G].min()
 nmae    = mae_loo / g_range if g_range > 0 else float('nan')
 n_under = sum(1 for a, p in pairs if p < a)
 dl      = design_limits(pairs)
-sigma_mc      = dl['s_e']                       # sigma LOOCV
+sigma_mc      = dl['s_e']                               # sigma LOOCV
 design_lambda = dl['table'][DESIGN_PCT]['emp']  # lambda P90 empiris
 
 print('')
-print('  File        : ' + str(DATA_FILE))
+print('  ID File     : ' + str(FILE_ID))
 print('  Jumlah data : ' + str(len(df)) + ' pengukuran')
 print('  Range g     : ' + format(df[COL_G].min(), '.5f') + ' - ' + format(df[COL_G].max(), '.5f'))
 print('')
@@ -455,7 +452,7 @@ if SHOW_PLOTS:
 print(SEP)
 print('   RINGKASAN')
 print(SEP)
-print('  Data      : ' + str(len(df)) + ' pengukuran dari ' + str(DATA_FILE))
+print('  Data      : ' + str(len(df)) + ' pengukuran (dari Google Drive)')
 print('  k = ' + format(cal['k'], '.2f') + ' | n = ' + format(cal['n'], '.4f')
       + ' | R2 = ' + format(cal['r2'], '.4f') + ' | lambda = ' + format(design_lambda, '.3f'))
 print('  MAE LOOCV = ' + format(mae_loo, '.5f') + ' | NMAE = ' + format(nmae * 100, '.1f') + '%')
