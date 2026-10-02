@@ -8,11 +8,11 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 # Konfigurasi Halaman Streamlit
-st.set_page_config(page_title="Prediksi Getaran Pit 3", layout="wide")
+st.set_page_config(page_title="Prediksi Getaran Pit 3", layout="wide", initial_sidebar_state="expanded")
 st.title("Aplikasi Prediksi Getaran Blasting - PIT 3")
 
 # =====================================================================
-# [A] KONFIGURASI 
+# [A] KONFIGURASI DOWNLOAD DATA
 # =====================================================================
 FILE_ID = '1xwJz5xrysYvEPK7lZMweL5rAAbBFkNA1'
 DOWNLOAD_URL = f'https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx'
@@ -27,22 +27,30 @@ G_GRAV      = 9806.65
 
 SHOW_PLOTS  = True
 
-# --- EVENT YANG MAU DIPREDIKSI ---
+# =====================================================================
+# [B] MENU INPUT PARAMETER DI SIDEBAR (WEB UI)
+# =====================================================================
+st.sidebar.header("⚙️ Input Parameter Blasting")
+st.sidebar.markdown("Silakan atur parameter rencana peledakan di bawah ini:")
+
 INPUT = {
-    'distance_m': 255,
-    'charge_kg': 30,
-    'row_number': 5,
-    'controll_ms': 109,
-    'wall_echelon_ms': 42,
-    'freeface_echelon_ms': 0,
-    'freeface_count': 2,
-    'geological_condt': 'Fault',
-    'measuring_elevation': 'higher',
-    'tie_up_type': 'boxcut',
+    'distance_m': st.sidebar.number_input('Distance (m)', min_value=1.0, value=255.0, step=1.0),
+    'charge_kg': st.sidebar.number_input('Charge per delay (kg)', min_value=1.0, value=30.0, step=1.0),
+    'row_number': st.sidebar.number_input('Row Number', min_value=1, max_value=20, value=5, step=1),
+    'controll_ms': st.sidebar.number_input('Control Delay (ms)', min_value=0, value=109, step=1),
+    'wall_echelon_ms': st.sidebar.number_input('Wall Echelon (ms)', min_value=0, value=42, step=1),
+    'freeface_echelon_ms': st.sidebar.number_input('Freeface Echelon (ms)', min_value=0, value=0, step=1),
+    'freeface_count': st.sidebar.number_input('Freeface Count', min_value=1, value=2, step=1),
+    'geological_condt': st.sidebar.selectbox('Geological Condition', ['normal', 'coal', 'Fault'], index=2),
+    'measuring_elevation': st.sidebar.selectbox('Measuring Elevation', ['lower', 'normal', 'higher'], index=2),
+    'tie_up_type': st.sidebar.selectbox('Tie-up Type', ['boxcut', 'echelon'], index=0),
 }
 
+st.sidebar.divider()
+st.sidebar.caption("Data diambil otomatis dari Google Drive setiap kali parameter diubah.")
+
 # =====================================================================
-# [B] & [C] & [D] FUNGSI-FUNGSI NUMERIK
+# [C] FUNGSI-FUNGSI NUMERIK
 # =====================================================================
 
 COL_AMAKS = 'Amaks (mm/s^s) Maks'
@@ -199,10 +207,10 @@ def recommend(inp, cal, mean_wf, df, target, design_lambda):
     st.write(f"**Ambang aman** <= {target:.3f}")
     
     if g0 <= target:
-        st.success('STATUS: AMAN - tidak perlu perubahan desain.')
+        st.success('✅ STATUS: AMAN - tidak perlu perubahan desain.')
         return
     
-    st.error('STATUS: DI ATAS AMBANG -> perlu mitigasi.')
+    st.error('⚠️ STATUS: DI ATAS AMBANG -> perlu mitigasi.')
     
     st.markdown("**(LANGKAH 1) Ubah parameter operasional ke level teraman:**")
     work = dict(inp)
@@ -238,16 +246,16 @@ def recommend(inp, cal, mean_wf, df, target, design_lambda):
         st.write("Tidak perlu - target tercapai hanya dengan tweak operasional.")
 
 # =====================================================================
-# [E] JALANKAN PROSES
+# [D] PROSES UTAMA
 # =====================================================================
 
-with st.spinner("Mengunduh data dari Google Drive..."):
+with st.spinner("Membaca dan mengkalibrasi data dari Google Drive..."):
     try:
         response = requests.get(DOWNLOAD_URL)
         response.raise_for_status() 
         df_raw = pd.read_excel(io.BytesIO(response.content), sheet_name=SHEET_NAME, engine='openpyxl')
     except Exception as e:
-        st.error(f"Gagal mengambil data dari Google Drive. Pastikan akses file adalah 'Anyone with the link'. Error: {e}")
+        st.error(f"Gagal mengambil data dari Google Drive. Pastikan file bersifat publik ('Anyone with the link'). Error: {e}")
         st.stop()
 
 # Validasi dan Kalkulasi
@@ -265,7 +273,7 @@ dl      = design_limits(pairs)
 sigma_mc      = dl['s_e']                               
 design_lambda = dl['table'][DESIGN_PCT]['emp']  
 
-# --- Siapkan Input ---
+# --- Siapkan Input dari Sidebar ---
 INPUT['row_class'] = '1-3' if INPUT['row_number'] <= 3 else ('4-7' if INPUT['row_number'] <= 7 else '>7')
 INPUT['controll_binned'] = 67 if INPUT['controll_ms'] == 42 else INPUT['controll_ms']
 INPUT['ffe_binned'] = '0' if INPUT['freeface_echelon_ms'] == 0 else ('42-67' if INPUT['freeface_echelon_ms'] <= 67 else '>=109')
@@ -281,62 +289,74 @@ g_design = g_med * design_lambda
 prob = 100.0 * float(np.mean(g_arr > G_TARGET))
 
 # =====================================================================
-# MENAMPILKAN HASIL KE WEB STREAMLIT
+# [E] TAMPILAN DASHBOARD
 # =====================================================================
 
-st.subheader("RINGKASAN KALIBRASI DATA AKTUAL")
+st.subheader("📊 RINGKASAN KALIBRASI DATA AKTUAL")
 col1, col2, col3 = st.columns(3)
-col1.metric("Jumlah Data", f"{len(df)} pengukuran")
+col1.metric("Jumlah Data Valid", f"{len(df)} pengukuran")
 col2.metric("MAE LOOCV", f"{mae_loo:.5f} g")
 col3.metric("NMAE", f"{nmae * 100:.1f}%")
 
-st.text(f"""
-[REGRESI ln(Amaks) vs ln(SD)]
-k = {cal['k']:.2f} | n = {cal['n']:.4f} | R2 = {cal['r2']:.4f}
-sigma in-sample = {cal['sigma']:.4f} | sigma LOOCV = {dl['s_e']:.4f} (MC)
-MEAN_WF = {mean_wf:.4f} | lambda P{DESIGN_PCT} = {design_lambda:.3f}
-""")
+with st.expander("Lihat Detail Regresi Regresi & Parameter Model"):
+    st.text(f"""
+    [REGRESI ln(Amaks) vs ln(SD)]
+    k = {cal['k']:.2f} | n = {cal['n']:.4f} | R2 = {cal['r2']:.4f}
+    sigma in-sample = {cal['sigma']:.4f} | sigma LOOCV = {dl['s_e']:.4f} (MC)
+    MEAN_WF = {mean_wf:.4f} | lambda P{DESIGN_PCT} = {design_lambda:.3f}
+    """)
 
 st.divider()
 
-st.subheader("PREDIKSI GETARAN (g)")
-st.text(f"""
-Distance {INPUT['distance_m']} m | Charge {INPUT['charge_kg']} kg | SD {sd:.2f}
-Geologi {INPUT['geological_condt']} | Elev {INPUT['measuring_elevation']} | Tie-up {INPUT['tie_up_type']}
-Row {INPUT['row_number']} | Control {INPUT['controll_ms']} ms | Wall ech {INPUT['wall_echelon_ms']} ms | FF ech {INPUT['freeface_echelon_ms']} ms | FF count {INPUT['freeface_count']}
-WF normalized = {wf_norm:.3f}
-""")
+st.subheader("🎯 HASIL PREDIKSI GETARAN (g)")
 
-st.markdown(f"""
-* **Prediksi g (harapan)** : `{g_mean:.5f}` ({get_status(g_mean)})
-* **Median (P50)** : `{g_med:.5f}`
-* **Rentang P10-P90** : `{g_p10:.5f}` - `{g_p90:.5f}`
-* **Probabilitas g > {G_TARGET:.3f}** : `{prob:.1f}%`
-* **DESIGN VALUE (P90)** : `{g_design:.5f}` ({get_status(g_design)})  *(<- acuan keputusan)*
-""")
+col_res1, col_res2 = st.columns(2)
+with col_res1:
+    st.markdown(f"""
+    **Parameter Prediksi Utama:**
+    - **Distance:** {INPUT['distance_m']} m
+    - **Charge:** {INPUT['charge_kg']} kg
+    - **Scale Distance (SD):** {sd:.2f}
+    - **WF normalized:** {wf_norm:.3f}
+    """)
+with col_res2:
+    st.markdown(f"""
+    **Hasil Prediksi Numerik:**
+    - **Prediksi Harapan:** `{g_mean:.5f}` ({get_status(g_mean)})
+    - **Median (P50):** `{g_med:.5f}`
+    - **Rentang P10-P90:** `{g_p10:.5f}` - `{g_p90:.5f}`
+    - **Probabilitas > {G_TARGET:.3f}:** `{prob:.1f}%`
+    """)
+
+st.info(f"**DESIGN VALUE (P90) : `{g_design:.5f}` ({get_status(g_design)})**  *(<- Acuan Keputusan)*")
 
 st.divider()
 
+# Tampilkan Rekomendasi
 recommend(INPUT, cal, mean_wf, df, G_TARGET, design_lambda)
 
 st.divider()
 
 # Menampilkan Grafik
 if SHOW_PLOTS:
-    st.subheader("Visualisasi")
+    st.subheader("📈 VISUALISASI MODEL")
     imp = importance_metrics(cal, INPUT, mean_wf)
     order = sorted(ALL_PARAMS, key=lambda p: -imp['sobol'][p])
     
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
+    # Grafik 1: Distribusi MC
     ax1.hist(g_arr, bins=60, color='#4a7fb5', edgecolor='white', linewidth=0.3)
     ax1.axvline(G_TARGET, color='#c0392b', lw=2.2, ls='--', label='Ambang ' + format(G_TARGET, '.3f'))
     ax1.axvline(g_med, color='#1a5276', lw=2, label='Median ' + format(g_med, '.4f'))
     ax1.axvline(g_design, color='#8e44ad', lw=2, ls=':', label='Design P90 ' + format(g_design, '.4f'))
-    ax1.set_xlabel('Nilai g'); ax1.set_ylabel('Frekuensi')
+    ax1.set_xlabel('Nilai g')
+    ax1.set_ylabel('Frekuensi')
     ax1.set_title(f'Distribusi Monte Carlo ({N_ITER:,} iterasi)')
-    ax1.legend(fontsize=9); ax1.grid(alpha=0.2)
+    ax1.legend(fontsize=9)
+    ax1.grid(alpha=0.2)
 
+    # Grafik 2: Tornado Chart (Sobol)
     vals = [imp['sobol'][p] for p in order]
     colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(order)))
     bars = ax2.barh(range(len(order)), vals, color=colors, edgecolor='black', linewidth=0.6)
@@ -345,11 +365,13 @@ if SHOW_PLOTS:
     ax2.invert_yaxis()
     ax2.set_xlabel('Kontribusi terhadap varians g - Sobol (%)')
     ax2.set_title('Kepentingan Faktor')
+    
     for b, v in zip(bars, vals):
         ax2.text(v + max(vals) * 0.01, b.get_y() + b.get_height() / 2,
                  format(v, '.1f') + '%', va='center', fontsize=8, fontweight='bold')
-    ax2.set_xlim(0, max(vals) * 1.18); ax2.grid(axis='x', alpha=0.3)
+                 
+    ax2.set_xlim(0, max(vals) * 1.18)
+    ax2.grid(axis='x', alpha=0.3)
 
     plt.tight_layout()
-    # PENTING: Gunakan st.pyplot() bukan plt.show()
     st.pyplot(fig)
