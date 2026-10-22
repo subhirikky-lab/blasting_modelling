@@ -1,377 +1,1008 @@
+# =====================================================================
+# APLIKASI PREDIKSI GETARAN BLASTING - PIT 3          (model v5)
+# =====================================================================
+# Mesin model:
+#   1. Atenuasi per geologi   : A = k_geo * SD^(-n_geo)  (Fault, coal, normal)
+#   2. Faktor jumlah baris    : pengali langsung per kelas baris (1-3, 4-7, 8-9)
+#   3. Weighting factor       : faktor operasional lain (tie-up, delay, freeface,
+#                               elevasi titik ukur), rata-rata berbobot
+#   4. Monte Carlo + design value (lambda P90) dari validasi per-event
+#
+# Data diambil dari Google Drive (Sheet1). Hanya blast dalam batas kalibrasi
+# yang dipakai: baris <= 9 dan jarak >= 86 m.
+#
+# Deploy: Streamlit Cloud. requirements.txt minimal:
+#   streamlit, pandas, numpy, scipy, plotly, openpyxl, requests
+# =====================================================================
+
+import io
+import os
 import math
+
 import numpy as np
 import pandas as pd
-from scipy import stats
 import requests
-import io
 import streamlit as st
-import matplotlib.pyplot as plt
-
-# Konfigurasi Halaman Streamlit
-st.set_page_config(page_title="Prediksi Getaran Pit 3", layout="wide", initial_sidebar_state="expanded")
-st.title("Aplikasi Prediksi Getaran Blasting - PIT 3")
+from scipy import stats
+import plotly.graph_objects as go
 
 # =====================================================================
-# [A] KONFIGURASI DOWNLOAD DATA
+# [A] KONFIGURASI
 # =====================================================================
 FILE_ID = '1xwJz5xrysYvEPK7lZMweL5rAAbBFkNA1'
-DOWNLOAD_URL = f'https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx'
+DOWNLOAD_URLS = [   # dicoba berurutan: Google Sheets, lalu file .xlsx biasa di Drive
+    f'https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx',
+    f'https://drive.google.com/uc?export=download&id={FILE_ID}',
+]
 SHEET_NAME = 'Sheet1'
+REFRESH_MIN = 5                                   # data Drive diambil ulang tiap n menit
+LOCAL_DATA = os.environ.get('PIT3_LOCAL_DATA')   # opsional: path file lokal untuk uji
 
-METHOD      = 'geometric'
-G_TARGET    = 0.030
-DESIGN_PCT  = 90
-N_ITER      = 10000
-SEED        = 42
-G_GRAV      = 9806.65
+# Urutan kolom template upload (sama dengan sheet di Drive)
+TEMPLATE_COLS = ['Tanggal', 'PPA (mm/s^s) Trans', 'PPA (mm/s^s) Long', 'PPA (mm/s^s) Maks',
+                 'Amaks (mm/s^s) Trans', 'Amaks (mm/s^s) Long', 'Amaks (mm/s^s) Maks', 'nilai_g',
+                 'charge_kg', 'distance_m', 'hole_diameter_mm', 'burden_m', 'spacing_m', 'depth_m',
+                 'tie_up_type', 'wall_echelon_ms', 'freeface_echelon_ms', 'controll_ms',
+                 'freeface_count', 'geological_condt', 'measuring_elevation', 'row_number', 'frekuensi_hz']
 
-SHOW_PLOTS  = True
+G_TARGET = 0.030            # batas aman (k_h dari geoteknik)
+MAX_ROWS = 9                # batas kalibrasi
+MIN_DIST = 86               # batas kalibrasi (m)
+MIN_SAMPLES = 5             # level dengan data < ini dianggap tipis
+MIN_GEO_FOR_OWN_N = 8       # geologi dengan data < ini memakai n bersama
+DESIGN_PCT = 90             # persentil design value
+N_ITER = 10000
+SEED = 42
+G_GRAV = 9806.65            # mm/s^2
 
-# =====================================================================
-# [B] MENU INPUT PARAMETER DI SIDEBAR (WEB UI)
-# =====================================================================
-st.sidebar.header("⚙️ Input Parameter Blasting")
-st.sidebar.markdown("Silakan atur parameter rencana peledakan di bawah ini:")
+ROW_AS_MULTIPLIER = True    # True: jumlah baris = pengali langsung (v5)
+LAMBDA_PER_GEOLOGI = False  # True: lambda & sigma per geologi
 
-INPUT = {
-    'distance_m': st.sidebar.number_input('Distance (m)', min_value=1.0, value=255.0, step=1.0),
-    'charge_kg': st.sidebar.number_input('Charge per delay (kg)', min_value=1.0, value=30.0, step=1.0),
-    'row_number': st.sidebar.number_input('Row Number', min_value=1, max_value=20, value=5, step=1),
-    'controll_ms': st.sidebar.number_input('Control Delay (ms)', min_value=0, value=109, step=1),
-    'wall_echelon_ms': st.sidebar.number_input('Wall Echelon (ms)', min_value=0, value=42, step=1),
-    'freeface_echelon_ms': st.sidebar.number_input('Freeface Echelon (ms)', min_value=0, value=0, step=1),
-    'freeface_count': st.sidebar.number_input('Freeface Count', min_value=1, value=2, step=1),
-    'geological_condt': st.sidebar.selectbox('Geological Condition', ['normal', 'coal', 'Fault'], index=2),
-    'measuring_elevation': st.sidebar.selectbox('Measuring Elevation', ['lower', 'normal', 'higher'], index=2),
-    'tie_up_type': st.sidebar.selectbox('Tie-up Type', ['boxcut', 'echelon'], index=0),
-}
-
-st.sidebar.divider()
-st.sidebar.caption("Data diambil otomatis dari Google Drive setiap kali parameter diubah.")
-
-# =====================================================================
-# [C] FUNGSI-FUNGSI NUMERIK
-# =====================================================================
-
-COL_AMAKS = 'Amaks (mm/s^s) Maks'
-COL_G     = 'nilai_g'
-COL_DIST  = 'distance_m'
-COL_CHG   = 'charge_kg'
-
-PARAMS_CAT = ['geological_condt', 'tie_up_type', 'measuring_elevation', 'row_class', 'ffe_binned']
-PARAMS_NUM = ['controll_binned', 'wall_echelon_ms', 'freeface_count']
-ALL_PARAMS = PARAMS_CAT + PARAMS_NUM
-CONTROLLABLE_OPS = ['tie_up_type', 'controll_binned', 'wall_echelon_ms', 'ffe_binned', 'freeface_count']
+COL_AMAKS, COL_G, COL_DIST, COL_CHG = 'Amaks (mm/s^s) Maks', 'nilai_g', 'distance_m', 'charge_kg'
+GEO = 'geological_condt'
+REQUIRED = [COL_AMAKS, COL_G, COL_DIST, COL_CHG, GEO, 'row_number', 'tie_up_type',
+            'measuring_elevation', 'controll_ms', 'wall_echelon_ms',
+            'freeface_echelon_ms', 'freeface_count']
+OPS_CAT = ['tie_up_type', 'measuring_elevation', 'ffe_binned']
+OPS_NUM = ['controll_binned', 'wall_echelon_ms', 'freeface_count']
+ROW_CLASSES = ['1-3', '4-7', '8-9']
 
 NICE = {
-    'row_class': 'Row Number (kelas)', 'controll_binned': 'Control Delay (ms)',
-    'wall_echelon_ms': 'Wall Echelon (ms)', 'ffe_binned': 'Freeface Echelon (ms)',
-    'freeface_count': 'Freeface Count', 'geological_condt': 'Geological Condition',
-    'tie_up_type': 'Tie-up Type', 'measuring_elevation': 'Measuring Elevation',
+    GEO: 'Geologi', 'row_class': 'Jumlah baris', 'tie_up_type': 'Tie-up',
+    'measuring_elevation': 'Elevasi titik ukur', 'ffe_binned': 'Freeface echelon (ms)',
+    'controll_binned': 'Control delay (ms)', 'wall_echelon_ms': 'Wall echelon (ms)',
+    'freeface_count': 'Freeface count',
 }
 
-STATUS_THRESHOLDS = [(0.020, 'EXCELLENT'), (0.030, 'SAFE'), (0.100, 'MODERATE'),
-                     (0.200, 'RISKY'), (float('inf'), 'EXTREMELY RISKY')]
+# Faktor yang bisa dilihat di tab Data Historis: label -> (kolom, urutan level)
+HIST_FACTORS = {
+    'Geologi': (GEO, ['Fault', 'coal', 'normal']),
+    'Jumlah baris': ('row_class', ROW_CLASSES),
+    'Freeface count': ('freeface_count', None),
+    'Wall echelon (ms)': ('wall_echelon_ms', None),
+    'Freeface echelon (ms)': ('ffe_binned', ['0', '42-67', '>=109']),
+    'Control delay (ms)': ('controll_binned', None),
+    'Tie-up': ('tie_up_type', ['boxcut', 'echelon']),
+    'Elevasi titik ukur': ('measuring_elevation', ['lower', 'normal', 'higher']),
+}
 
-def get_status(g):
-    for thr, label in STATUS_THRESHOLDS:
+# Parameter yang masih bisa diubah setelah lubang dibor:
+# (kunci input, parameter model, fungsi level-model -> nilai input)
+CONTROLLABLE = [
+    ('tie_up_type', 'tie_up_type', lambda v: v),
+    ('controll_ms', 'controll_binned', lambda v: int(float(v))),
+    ('wall_echelon_ms', 'wall_echelon_ms', lambda v: int(float(v))),
+    ('freeface_echelon_ms', 'ffe_binned', lambda v: {'0': 0, '42-67': 42, '>=109': 109}[v]),
+    ('freeface_count', 'freeface_count', lambda v: int(float(v))),
+]
+
+# Warna (palet kategorikal tervalidasi + bentuk marker sebagai penanda kedua)
+# amber · teal · plum · rust · indigo — lolos uji keterbacaan & buta warna (terang & gelap)
+PALETTE = ['#c27c0e', '#008a7e', '#8e4fa0', '#c4532f', '#4a5fc1']
+ACCENT = PALETTE[0]          # warna utama (amber)
+DIV_LOW, DIV_MID, DIV_HIGH = '#008a7e', '#ebe7df', '#c4532f'   # di bawah batas · sekitar · di atas
+SYMBOLS = ['circle', 'square', 'triangle-up', 'diamond', 'triangle-down']
+GEO_COLOR = {'Fault': PALETTE[0], 'coal': PALETTE[1], 'normal': PALETTE[2]}
+GEO_SYMBOL = {'Fault': SYMBOLS[0], 'coal': SYMBOLS[1], 'normal': SYMBOLS[2]}
+MUTED = 'rgba(128,128,128,0.9)'
+GRIDC = 'rgba(128,128,128,0.18)'
+
+# Status: (batas atas, label, warna, ikon, warna teks badge)
+STATUS = [
+    (0.020, 'EXCELLENT', '#0ca30c', '✅', '#ffffff'),
+    (0.030, 'SAFE', '#0ca30c', '✅', '#ffffff'),
+    (0.100, 'MODERATE', '#fab219', '⚠️', '#0b0b0b'),
+    (0.200, 'RISKY', '#ec835a', '🔶', '#0b0b0b'),
+    (float('inf'), 'EXTREMELY RISKY', '#d03b3b', '⛔', '#ffffff'),
+]
+
+DELAY_OPTIONS = [0, 17, 25, 42, 67, 109, 176]
+
+
+# =====================================================================
+# [B] TAMPILAN DASAR
+# =====================================================================
+st.set_page_config(page_title='Prediksi Getaran Pit 3', page_icon='💥', layout='wide',
+                   initial_sidebar_state='expanded')
+
+st.markdown("""
+<style>
+.block-container {padding-top: 1.6rem;}
+.kpi {border-radius: 12px; padding: 14px 16px 12px; background: rgba(128,128,128,0.08);
+      border-left: 6px solid var(--c); height: 100%;}
+.kpi .lbl {font-size: 0.80rem; opacity: 0.75; margin-bottom: 2px; text-transform: uppercase;
+           letter-spacing: 0.03em;}
+.kpi .val {font-size: 1.85rem; font-weight: 700; line-height: 1.15;}
+.kpi .sub {font-size: 0.84rem; opacity: 0.85; margin-top: 6px;}
+.badge {display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 0.74rem;
+        font-weight: 700; background: var(--c); color: var(--t); margin-left: 6px;
+        vertical-align: middle;}
+.banner {border-radius: 12px; padding: 12px 18px; margin: 14px 0 6px;
+         background: rgba(128,128,128,0.08); border-left: 6px solid var(--c);}
+.banner b {font-size: 1.02rem;}
+.step {border-radius: 10px; padding: 10px 14px; margin-bottom: 8px;
+       background: rgba(128,128,128,0.07);}
+.muted {opacity: 0.75; font-size: 0.86rem;}
+/* aksen amber untuk tab aktif (berlaku juga tanpa config.toml) */
+div[role="tab"][aria-selected="true"], button[role="tab"][aria-selected="true"] {color: #c27c0e !important;}
+div[role="tab"][aria-selected="true"] p, button[role="tab"][aria-selected="true"] p {color: #c27c0e !important;}
+[data-baseweb="tab-highlight"], [data-testid="stTabHighlight"] {background-color: #c27c0e !important;}
+h1 {letter-spacing: -0.01em;}
+h3 {border-bottom: 2px solid rgba(194,124,14,0.35); padding-bottom: 4px;}
+</style>
+""", unsafe_allow_html=True)
+
+
+def status_of(g):
+    for thr, label, color, icon, tcol in STATUS:
         if g <= thr:
-            return label
-    return 'EXTREMELY RISKY'
+            return dict(label=label, color=color, icon=icon, tcol=tcol)
+    return dict(label='EXTREMELY RISKY', color='#d03b3b', icon='⛔', tcol='#ffffff')
 
-def apply_binning(df):
-    df = df.copy()
-    df['row_class'] = df['row_number'].apply(
-        lambda r: '1-3' if r <= 3 else ('4-7' if r <= 7 else '>7'))
-    df['controll_binned'] = df['controll_ms'].replace({42: 67})
-    df['ffe_binned'] = df['freeface_echelon_ms'].apply(
-        lambda x: '0' if x == 0 else ('42-67' if x <= 67 else '>=109'))
-    return df
 
-def validate(df):
-    df = df.copy()
+def kpi(label, value, sub='', g_for_status=None, color=ACCENT):
+    badge = ''
+    if g_for_status is not None:
+        s = status_of(g_for_status)
+        color = s['color']
+        badge = '<span class="badge" style="--c:%s;--t:%s">%s %s</span>' % (
+            s['color'], s['tcol'], s['icon'], s['label'])
+    st.markdown('<div class="kpi" style="--c:%s"><div class="lbl">%s</div>'
+                '<div class="val">%s%s</div><div class="sub">%s</div></div>'
+                % (color, label, value, badge, sub), unsafe_allow_html=True)
+
+
+def show_chart(fig):
+    try:
+        st.plotly_chart(fig, width='stretch', theme='streamlit')
+    except (TypeError, st.errors.StreamlitAPIException):
+        st.plotly_chart(fig, use_container_width=True, theme='streamlit')
+
+
+def show_table(df):
+    try:
+        st.dataframe(df, width='stretch', hide_index=True)
+    except (TypeError, st.errors.StreamlitAPIException):
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def style_fig(fig, title=None, height=420, legend=True):
+    fig.update_layout(
+        height=height, margin=dict(l=10, r=10, t=56 if title else 20, b=90 if legend else 10),
+        title=dict(text=title, x=0, xanchor='left', font=dict(size=15)) if title else None,
+        showlegend=legend,
+        legend=dict(orientation='h', yanchor='top', y=-0.16, x=0, xanchor='left', title=None),
+        hoverlabel=dict(font_size=12), font=dict(size=12),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor=GRIDC, zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor=GRIDC, zeroline=False)
+    return fig
+
+
+def ref_hline(fig, y, text, log_y=False, side='left'):
+    """Garis acuan horizontal + label. Pada sumbu log, posisi label Plotly
+    harus dalam log10 — ditangani di sini."""
+    fig.add_hline(y=y, line=dict(color=MUTED, width=1.5, dash='dash'))
+    fig.add_annotation(x=0.01 if side == 'left' else 0.99, xref='paper',
+                       y=math.log10(y) if log_y else y, yref='y', text=text, showarrow=False,
+                       xanchor='left' if side == 'left' else 'right', yanchor='bottom',
+                       font=dict(size=11, color=MUTED))
+
+
+# =====================================================================
+# [C] DATA
+# =====================================================================
+@st.cache_data(ttl=REFRESH_MIN * 60, show_spinner=False)
+def fetch_remote(urls):
+    """Ambil file Excel dari Google Drive. Return (isi file, waktu ambil WIB)."""
+    errors = []
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            if r.content[:2] != b'PK':          # file xlsx selalu diawali 'PK' (zip)
+                raise ValueError('bukan file Excel (kemungkinan halaman login/izin)')
+            wib = pd.Timestamp.now(tz='Asia/Jakarta').strftime('%d/%m/%Y %H:%M')
+            return r.content, wib
+        except Exception as e:
+            errors.append('%s -> %s' % (url.split('/')[2], e))
+    raise RuntimeError('; '.join(errors))
+
+
+def read_excel_any(src):
+    """Baca Sheet1; kalau nama sheet beda, pakai sheet pertama."""
+    data = io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src
+    xl = pd.ExcelFile(data, engine='openpyxl')
+    sheet = SHEET_NAME if SHEET_NAME in xl.sheet_names else xl.sheet_names[0]
+    return xl.parse(sheet)
+
+
+def template_bytes():
+    buf = io.BytesIO()
+    pd.DataFrame(columns=TEMPLATE_COLS).to_excel(buf, sheet_name=SHEET_NAME, index=False)
+    return buf.getvalue()
+
+
+def parse_dates(series):
+    try:
+        return pd.to_datetime(series, dayfirst=True, errors='coerce', format='mixed')
+    except (TypeError, ValueError):
+        return pd.to_datetime(series, dayfirst=True, errors='coerce')
+
+
+def last_blast_date(d):
+    """Tanggal di baris terakhir (data diisi berurutan) + tanggal yang tampak salah ketik."""
+    dt = parse_dates(d['tanggal'])
+    last = dt.iloc[-1].strftime('%d/%m/%Y') if pd.notna(dt.iloc[-1]) else str(d['tanggal'].iloc[-1])
+    today = pd.Timestamp.now(tz='Asia/Jakarta').tz_localize(None).normalize()
+    future = [x.strftime('%d/%m/%Y') for x in dt[dt > today]]
+    return last, future
+
+
+def _date_label(v):
+    if isinstance(v, (pd.Timestamp,)) or hasattr(v, 'strftime'):
+        try:
+            return v.strftime('%d/%m/%y')
+        except Exception:
+            return str(v)
+    return str(v).strip()
+
+
+@st.cache_data(show_spinner=False)
+def prepare(raw):
+    df = raw.copy()
     df.columns = df.columns.str.strip()
-    if 'freeface_count' in df.columns:
-        df['freeface_count'] = df['freeface_count'].replace({0: 1})
-    df = df.dropna(subset=[COL_AMAKS, COL_DIST, COL_CHG])
-    df = df[(df[COL_AMAKS] > 0) & (df[COL_DIST] > 0) & (df[COL_CHG] > 0)].copy()
-    df = df[df['row_number'] < 10].copy()
-    df['scale_distance'] = df[COL_DIST] / np.sqrt(df[COL_CHG])
-    df['Amaks_maks'] = df[COL_AMAKS]
-    return apply_binning(df)
+    missing = [c for c in REQUIRED if c not in df.columns]
+    if missing:
+        raise KeyError('Kolom wajib tidak ada di data: ' + ', '.join(missing))
+    df['tanggal'] = df['Tanggal'].apply(_date_label) if 'Tanggal' in df.columns else ''
+    reason = pd.Series('', index=df.index)
+    incomplete = df[REQUIRED].isna().any(axis=1)
+    reason[incomplete] = 'data tidak lengkap'
+    num = df[[COL_AMAKS, COL_G, COL_DIST, COL_CHG]].apply(pd.to_numeric, errors='coerce')
+    bad = (~incomplete) & ((num <= 0).any(axis=1) | num.isna().any(axis=1))
+    reason[bad] = 'nilai nol / tidak valid'
+    ok = reason == ''
+    rows = pd.to_numeric(df['row_number'], errors='coerce')
+    dist = pd.to_numeric(df[COL_DIST], errors='coerce')
+    reason[ok & (rows > MAX_ROWS)] = 'di luar batas: baris > %d' % MAX_ROWS
+    reason[ok & (rows <= MAX_ROWS) & (dist < MIN_DIST)] = 'di luar batas: jarak < %d m' % MIN_DIST
 
-def _aggregate(values, method):
-    arr = np.asarray(values, dtype=float)
-    if method == 'geometric':
-        return float(np.exp(np.mean(np.log(arr))))
-    return float(np.mean(arr))
+    excluded = df[reason != ''].copy()
+    excluded['alasan'] = reason[reason != '']
+    d = df[reason == ''].copy()
+    for c in [COL_AMAKS, COL_G, COL_DIST, COL_CHG, 'row_number', 'controll_ms',
+              'wall_echelon_ms', 'freeface_echelon_ms', 'freeface_count']:
+        d[c] = pd.to_numeric(d[c], errors='coerce')
+    d[GEO] = d[GEO].astype(str).str.strip()
+    d['tie_up_type'] = d['tie_up_type'].astype(str).str.strip()
+    d['measuring_elevation'] = d['measuring_elevation'].astype(str).str.strip()
+    d['freeface_count'] = d['freeface_count'].replace({0: 1})
+    d['sd'] = d[COL_DIST] / np.sqrt(d[COL_CHG])
+    d['A'] = d[COL_AMAKS].astype(float)
+    d = add_bins(d)
+    d['event'] = d['tanggal'].astype(str) + '_' + d[COL_CHG].astype(str)
+    return d.reset_index(drop=True), excluded.reset_index(drop=True)
 
-def calibrate(df, method=METHOD):
-    ln_a  = np.log(df['Amaks_maks'].values)
-    ln_sd = np.log(df['scale_distance'].values)
-    slope, intercept, r_val, _, _ = stats.linregress(ln_sd, ln_a)
-    k = float(np.exp(intercept))
-    n = float(-slope)
-    resid = ln_a - (intercept + slope * ln_sd)
-    sigma = float(np.std(resid, ddof=1))
-    r_sq  = float(r_val ** 2)
-    df = df.copy()
-    df['res_ratio'] = df['Amaks_maks'].values / (k * df['scale_distance'].values ** (-n))
-    real_factor, counts, freq = {}, {}, {}
-    n_tot = len(df)
-    for p in ALL_PARAMS:
-        rp, cp, fp = {}, {}, {}
-        for key, vals in df.groupby(p)['res_ratio']:
-            rp[key] = _aggregate(vals.values, method)
-            cp[key] = len(vals)
-            fp[key] = len(vals) / n_tot
-        real_factor[p], counts[p], freq[p] = rp, cp, fp
-    ranges = {p: max(v.values()) - min(v.values()) for p, v in real_factor.items()}
-    total  = sum(ranges.values())
-    weight = {p: (ranges[p] / total if total > 0 else 0.0) for p in ALL_PARAMS}
-    return dict(k=k, n=n, sigma=sigma, r2=r_sq, real_factor=real_factor, weight=weight, counts=counts, freq=freq, df=df)
 
-def _nearest_num(d, t):
-    keys = np.array([float(x) for x in d.keys()])
+def add_bins(d):
+    d = d.copy()
+    d['row_class'] = d['row_number'].apply(lambda r: '1-3' if r <= 3 else ('4-7' if r <= 7 else '8-9'))
+    d['controll_binned'] = d['controll_ms'].replace({42: 67})
+    d['ffe_binned'] = d['freeface_echelon_ms'].apply(
+        lambda x: '0' if x == 0 else ('42-67' if x <= 67 else '>=109'))
+    return d
+
+
+# =====================================================================
+# [D] MODEL
+# =====================================================================
+def _gm(v):
+    return float(np.exp(np.mean(np.log(np.asarray(v, dtype=float)))))
+
+
+def _nearest(d, t):
+    keys = np.array([float(x) for x in d])
     return list(d.values())[int(np.abs(keys - float(t)).argmin())]
 
-def real_factor_value(p, v, cal):
-    f = cal['real_factor'][p]
-    return f.get(v, 1.0) if isinstance(v, str) else _nearest_num(f, v)
 
-def compute_wf(row, cal):
-    return sum(real_factor_value(p, row[p], cal) * cal['weight'][p] for p in ALL_PARAMS)
+def fit_model(d):
+    """Kalibrasi lengkap dari data d."""
+    sl, ic, r, *_ = stats.linregress(np.log(d['sd']), np.log(d['A']))
+    base = {'*': (float(np.exp(ic)), float(-sl), float(r ** 2), len(d))}
+    n_common = float(-sl)
+    for g, x in d.groupby(GEO):
+        if len(x) >= MIN_GEO_FOR_OWN_N:
+            s, i, rr, *_ = stats.linregress(np.log(x['sd']), np.log(x['A']))
+            base[g] = (float(np.exp(i)), float(-s), float(rr ** 2), len(x))
+        else:
+            k_g = float(np.exp(np.mean(np.log(x['A']) + n_common * np.log(x['sd']))))
+            base[g] = (k_g, n_common, float('nan'), len(x))
 
-def mean_wf_of(df, cal):
-    return float(np.mean([compute_wf(r, cal) for _, r in df.iterrows()]))
+    b = np.array([_kn(g, base)[0] * s ** (-_kn(g, base)[1]) for g, s in zip(d[GEO], d['sd'])])
+    rr = d['A'].values / b
+    rowf, rowc = {}, {}
+    if ROW_AS_MULTIPLIER:
+        for c, v in pd.Series(rr).groupby(d['row_class'].values):
+            rowf[c], rowc[c] = _gm(v.values), len(v)
+        rr = rr / np.array([rowf[c] for c in d['row_class']])
+    params_cat = OPS_CAT + ([] if ROW_AS_MULTIPLIER else ['row_class'])
+    params = params_cat + OPS_NUM
+    x = d.assign(rr=rr)
+    rf, cnt, frq = {}, {}, {}
+    for p in params:
+        g = x.groupby(p)['rr']
+        rf[p] = {k: _gm(v.values) for k, v in g}
+        cnt[p] = {k: len(v) for k, v in g}
+        frq[p] = {k: len(v) / len(x) for k, v in g}
+    rng = {p: max(v.values()) - min(v.values()) for p, v in rf.items()}
+    tot = sum(rng.values())
+    w = {p: rng[p] / tot if tot else 0.0 for p in params}
+    m = dict(base=base, rowf=rowf, rowc=rowc, rf=rf, cnt=cnt, frq=frq, w=w,
+             params=params, params_cat=params_cat)
+    m['mean_wf'] = float(np.mean([_wf(row, m) for _, row in d.iterrows()]))
+    return m
 
-def median_g_event(inp, cal, mean_wf):
-    sd = inp['distance_m'] / np.sqrt(inp['charge_kg'])
-    return cal['k'] * sd ** (-cal['n']) * (compute_wf(inp, cal) / mean_wf) / G_GRAV
 
-def predict_g_mc(cal, sd, wf_norm, sigma, n_iter=N_ITER, seed=SEED):
-    rng = np.random.default_rng(seed)
-    err = rng.normal(0.0, sigma, n_iter)
-    return cal['k'] * (sd ** (-cal['n'])) * np.exp(err) * wf_norm / G_GRAV
+def _kn(geo, base):
+    k, n, *_ = base.get(geo, base['*'])
+    return k, n
 
-def loocv_predictions(df, method=METHOD):
-    pairs = []
-    for i in list(df.index):
-        train = df.drop(index=i)
-        test  = df.loc[i]
-        c  = calibrate(train, method)
-        mw = mean_wf_of(train, c)
-        gp = c['k'] * test['scale_distance'] ** (-c['n']) * (compute_wf(test, c) / mw) / G_GRAV
-        pairs.append((float(test[COL_G]), float(gp)))
-    return pairs
 
-def design_limits(pairs):
-    ratios = np.array([a / p for a, p in pairs if p > 0])
-    logr = np.log(ratios)
-    mu_e, s_e = float(np.mean(logr)), float(np.std(logr, ddof=1))
-    table = {}
-    for pct in (75, 90, 95):
-        table[pct] = dict(emp=float(np.percentile(ratios, pct)))
-    return dict(mu_e=mu_e, s_e=s_e, table=table)
+def _wf(row, m):
+    s = 0.0
+    for p in m['params']:
+        f, v = m['rf'][p], row[p]
+        s += (f.get(v, 1.0) if p in m['params_cat'] else _nearest(f, v)) * m['w'][p]
+    return s
 
-def importance_metrics(cal, inp_row, mean_wf):
-    weight = cal['weight']
-    levels, g_levels = {}, {}
-    for p in ALL_PARAMS:
-        lv = sorted(cal['real_factor'][p], key=float) if p in PARAMS_NUM else sorted(cal['real_factor'][p], key=str)
-        gl = []
-        for val in lv:
-            mod = dict(inp_row)
-            mod[p] = val
-            gl.append(median_g_event(mod, cal, mean_wf))
-        levels[p], g_levels[p] = lv, gl
-    C = {}
-    for p in ALL_PARAMS:
-        vals = list(cal['real_factor'][p].values())
-        frs  = [cal['freq'][p][kk] for kk in cal['real_factor'][p].keys()]
-        m    = sum(v * f for v, f in zip(vals, frs))
-        C[p] = (weight[p] ** 2) * sum(f * (v - m) ** 2 for v, f in zip(vals, frs))
-    s = sum(C.values())
-    sobol = {p: (C[p] / s * 100 if s > 0 else 0.0) for p in ALL_PARAMS}
-    oat_raw = {p: max(g_levels[p]) - min(g_levels[p]) for p in ALL_PARAMS}
-    so = sum(oat_raw.values())
-    oat = {p: (oat_raw[p] / so * 100 if so > 0 else 0.0) for p in ALL_PARAMS}
-    return dict(sobol=sobol, oat=oat, levels=levels, g_levels=g_levels)
 
-def recommend(inp, cal, mean_wf, df, target, design_lambda):
-    g_med = median_g_event(inp, cal, mean_wf)
-    g0 = g_med * design_lambda
-    
-    st.subheader("REKOMENDASI KEPUTUSAN")
-    st.write(f"**Median g** = {g_med:.5f} | **DESIGN g (x{design_lambda:.2f})** = {g0:.5f}")
-    st.write(f"**Ambang aman** <= {target:.3f}")
-    
-    if g0 <= target:
-        st.success('✅ STATUS: AMAN - tidak perlu perubahan desain.')
-        return
-    
-    st.error('⚠️ STATUS: DI ATAS AMBANG -> perlu mitigasi.')
-    
-    st.markdown("**(LANGKAH 1) Ubah parameter operasional ke level teraman:**")
-    work = dict(inp)
-    found = False
-    for p in CONTROLLABLE_OPS:
-        rf = cal['real_factor'][p]
-        safe = min(rf, key=lambda kk: rf[kk])
-        cur = _nearest_num(rf, inp[p]) if p in PARAMS_NUM else rf.get(inp[p], 1.0)
-        if rf[safe] < cur - 1e-12:
-            work[p] = safe
-            st.write(f"- {NICE[p]}: {inp[p]} -> **{safe}**")
-            found = True
-            
-    if not found:
-        st.write("(tidak ada perubahan operasional yang menurunkan g)")
-        
-    gd_ops = median_g_event(work, cal, mean_wf) * design_lambda
-    st.info(f"**=> DESIGN g setelah tweak:** {gd_ops:.5f}")
-    
-    st.markdown("**(LANGKAH 2) Kurangi charge per delay:**")
-    if gd_ops > target:
-        ch_t = work['charge_kg'] * (target / gd_ops) ** (2.0 / cal['n'])
-        ch_min = float(df[COL_CHG].min())
-        turun = (1 - ch_t / inp['charge_kg']) * 100
-        st.write(f"- Charge: {inp['charge_kg']:.1f} kg -> **{ch_t:.1f} kg** (turun {turun:.0f}%)")
-        if ch_t < ch_min:
-            st.warning(f"di bawah rentang data (min {ch_min:.0f} kg) -> ekstrapolasi, kurang andal")
-            
-        final = dict(work); final['charge_kg'] = max(ch_t, ch_min)
-        st.info(f"**=> Proyeksi Median:** {median_g_event(final, cal, mean_wf):.5f} | **DESIGN:** {median_g_event(final, cal, mean_wf) * design_lambda:.5f}")
-        st.caption("CATATAN: charge turun memperbaiki getaran TAPI bisa memperburuk fragmentasi.")
-    else:
-        st.write("Tidak perlu - target tercapai hanya dengan tweak operasional.")
+def components(row, m):
+    """Pecahan prediksi: baseline geologi, faktor baris, faktor operasional."""
+    k, n = _kn(row[GEO], m['base'])
+    g_base = k * row['sd'] ** (-n) / G_GRAV
+    f_row = m['rowf'].get(row['row_class'], 1.0) if ROW_AS_MULTIPLIER else 1.0
+    f_ops = _wf(row, m) / m['mean_wf']
+    return g_base, f_row, f_ops
+
+
+def predict_median(row, m):
+    g_base, f_row, f_ops = components(row, m)
+    return g_base * f_row * f_ops
+
+
+@st.cache_data(show_spinner=False)
+def build(d):
+    """Kalibrasi + validasi per event (tiap blast diprediksi model tanpa blast itu)."""
+    m = fit_model(d)
+    pred = np.empty(len(d))
+    for e in pd.unique(d['event']):
+        te = np.where(d['event'].values == e)[0]
+        mm = fit_model(d.drop(index=te))
+        for i in te:
+            pred[i] = predict_median(d.iloc[i], mm)
+    ratio = d[COL_G].values / pred
+    fac = {'*': dict(n=len(ratio), lam=float(np.percentile(ratio, DESIGN_PCT)),
+                     sigma=float(np.std(np.log(ratio), ddof=1)), bias=float(np.median(ratio)))}
+    for g in sorted(d[GEO].unique()):
+        r = ratio[d[GEO].values == g]
+        fac[g] = dict(n=len(r), lam=float(np.percentile(r, DESIGN_PCT)),
+                      sigma=float(np.std(np.log(r), ddof=1)) if len(r) > 1 else fac['*']['sigma'],
+                      bias=float(np.median(r)))
+    sl, ic, *_ = stats.linregress(np.log(d['sd']), np.log(d['A']))
+    return m, pred, fac, (float(np.exp(ic)), float(-sl))
+
+
+def factor_for(geo, fac):
+    return fac.get(geo, fac['*']) if LAMBDA_PER_GEOLOGI else fac['*']
+
+
+def input_row(inp):
+    row = pd.Series(add_bins(pd.DataFrame([inp])).iloc[0])
+    row['sd'] = inp['distance_m'] / math.sqrt(inp['charge_kg'])
+    return row
+
+
+def predict_event(inp, m, fac):
+    row = input_row(inp)
+    f = factor_for(inp[GEO], fac)
+    g_base, f_row, f_ops = components(row, m)
+    med = g_base * f_row * f_ops
+    sims = med * np.exp(np.random.default_rng(SEED).normal(0.0, f['sigma'], N_ITER))
+    return dict(row=row, sd=row['sd'], g_base=g_base, f_row=f_row, f_ops=f_ops, median=med,
+                mean=med * math.exp(f['sigma'] ** 2 / 2),
+                p10=float(np.percentile(sims, 10)), p90=float(np.percentile(sims, 90)),
+                prob=float(np.mean(sims > G_TARGET)), design=med * f['lam'],
+                lam=f['lam'], sigma=f['sigma'], sims=sims)
+
+
+def max_charge(distance, inp, m, factor):
+    """Charge per delay maksimum agar median*factor <= G_TARGET (desain operasional tetap)."""
+    row = input_row(dict(inp, distance_m=distance))
+    k, n = _kn(inp[GEO], m['base'])
+    _, f_row, f_ops = components(row, m)
+    sd_req = (k * f_row * f_ops * factor / (G_TARGET * G_GRAV)) ** (1.0 / n)
+    return (distance / sd_req) ** 2
+
 
 # =====================================================================
-# [D] PROSES UTAMA
+# [E] SIDEBAR
 # =====================================================================
+st.sidebar.markdown('## 📂 Sumber data')
+SRC_DRIVE, SRC_UPLOAD = '🔄 Otomatis dari Google Drive', '📤 Upload file manual'
+data_mode = st.sidebar.radio('Sumber data', [SRC_DRIVE, SRC_UPLOAD], label_visibility='collapsed')
+uploaded = None
+if data_mode == SRC_DRIVE:
+    if st.sidebar.button('Muat ulang data sekarang', icon='🔄'):
+        fetch_remote.clear()
+        st.rerun()
+    st.sidebar.caption('Setiap Excel di Google Drive diubah, aplikasi menghitung ulang otomatis '
+                       '(paling lambat %d menit, atau langsung dengan tombol di atas).' % REFRESH_MIN)
+else:
+    uploaded = st.sidebar.file_uploader('File Excel (.xlsx)', type=['xlsx'],
+                                        help='Format kolom sama dengan sheet di Google Drive.')
+    st.sidebar.download_button('Unduh template kosong', template_bytes(), file_name='template_data_pit3.xlsx',
+                               icon='📄', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+data_status = st.sidebar.container()
+st.sidebar.divider()
 
-with st.spinner("Membaca dan mengkalibrasi data dari Google Drive..."):
+st.sidebar.markdown('## ⚙️ Rencana peledakan')
+INPUT = {
+    'distance_m': st.sidebar.number_input('Jarak ke titik ukur (m)', min_value=1.0, value=255.0, step=5.0),
+    'charge_kg': st.sidebar.number_input('Charge per delay (kg)', min_value=1.0, value=30.0, step=1.0),
+    'row_number': int(st.sidebar.number_input('Jumlah baris', min_value=1, max_value=15, value=5, step=1)),
+    'geological_condt': st.sidebar.selectbox('Geologi', ['Fault', 'coal', 'normal'], index=0),
+}
+st.sidebar.markdown('#### Tie-up & delay')
+INPUT['tie_up_type'] = st.sidebar.selectbox('Tie-up', ['boxcut', 'echelon'], index=0)
+INPUT['controll_ms'] = st.sidebar.selectbox('Control delay (ms)', DELAY_OPTIONS, index=DELAY_OPTIONS.index(109))
+INPUT['wall_echelon_ms'] = st.sidebar.selectbox('Wall echelon (ms)', DELAY_OPTIONS, index=DELAY_OPTIONS.index(42))
+INPUT['freeface_echelon_ms'] = st.sidebar.selectbox('Freeface echelon (ms)', DELAY_OPTIONS, index=0)
+INPUT['freeface_count'] = st.sidebar.selectbox('Freeface count', [1, 2, 3], index=1,
+                                               help='1 = atas saja · 2 = atas + depan · 3 = atas + depan + samping')
+INPUT['measuring_elevation'] = st.sidebar.selectbox('Elevasi titik ukur', ['lower', 'normal', 'higher'], index=2)
+
+
+
+# =====================================================================
+# [F] MUAT DATA & KALIBRASI
+# =====================================================================
+if data_mode == SRC_UPLOAD and uploaded is None:
+    st.markdown('# 💥 Prediksi Getaran Blasting — Pit 3')
+    st.info('**Mode upload manual.** Unggah file Excel di sidebar kiri untuk mulai menghitung. '
+            'Formatnya sama dengan sheet di Google Drive (nama sheet `%s`). Kalau perlu, unduh '
+            'template kosong di bawah kotak upload.' % SHEET_NAME, icon='📤')
+    data_status.caption('Belum ada file yang diunggah.')
+    st.stop()
+
+with st.spinner('Membaca data dan mengkalibrasi model ...'):
     try:
-        response = requests.get(DOWNLOAD_URL)
-        response.raise_for_status() 
-        df_raw = pd.read_excel(io.BytesIO(response.content), sheet_name=SHEET_NAME, engine='openpyxl')
+        if data_mode == SRC_UPLOAD:
+            raw = read_excel_any(uploaded.getvalue())
+            source, fetched = 'file unggahan (%s)' % uploaded.name, None
+        elif LOCAL_DATA:
+            raw = read_excel_any(LOCAL_DATA)
+            source, fetched = 'Google Drive', pd.Timestamp.now(tz='Asia/Jakarta').strftime('%d/%m/%Y %H:%M')
+        else:
+            content, fetched = fetch_remote(tuple(DOWNLOAD_URLS))
+            raw = read_excel_any(content)
+            source = 'Google Drive'
+        df, excluded = prepare(raw)
     except Exception as e:
-        st.error(f"Gagal mengambil data dari Google Drive. Pastikan file bersifat publik ('Anyone with the link'). Error: {e}")
+        if data_mode == SRC_DRIVE:
+            st.error('**Gagal mengambil data dari Google Drive.** Pastikan file dibagikan sebagai '
+                     '"Anyone with the link – Viewer", atau pindah ke **Upload file manual** di sidebar.'
+                     '\n\nDetail: %s' % e, icon='⛔')
+        else:
+            st.error('**File tidak bisa dibaca.** Pastikan formatnya sama dengan template. Detail: %s' % e,
+                     icon='⛔')
         st.stop()
+    if len(df) < 15:
+        st.error('Data valid hanya %d blast — terlalu sedikit untuk kalibrasi.' % len(df))
+        st.stop()
+    model, cv_pred, fac, sd_line = build(df)
 
-# Validasi dan Kalkulasi
-df  = validate(df_raw)
-cal = calibrate(df, METHOD)
-df  = cal['df']
-mean_wf = mean_wf_of(df, cal)
+last_date, future_dates = last_blast_date(df)
+data_status.success('**%d blast** dipakai · %d disisihkan  \nData terakhir: **%s**%s'
+                    % (len(df), len(excluded), last_date,
+                       '  \nDiambil: %s WIB' % fetched if fetched else ''), icon='✅')
+if future_dates:
+    data_status.warning('Ada tanggal di masa depan (%s) — kemungkinan salah ketik di Excel.'
+                       % ', '.join(future_dates), icon='📅')
 
-pairs   = loocv_predictions(df, METHOD)
-mae_loo = float(np.mean([abs(a - p) for a, p in pairs]))
-g_range = df[COL_G].max() - df[COL_G].min()
-nmae    = mae_loo / g_range if g_range > 0 else float('nan')
-n_under = sum(1 for a, p in pairs if p < a)
-dl      = design_limits(pairs)
-sigma_mc      = dl['s_e']                               
-design_lambda = dl['table'][DESIGN_PCT]['emp']  
+res = predict_event(INPUT, model, fac)
+geos = sorted(df[GEO].unique())
+mae = float(np.mean(np.abs(df[COL_G].values - cv_pred)))
+ch_min, ch_max = float(df[COL_CHG].min()), float(df[COL_CHG].max())
 
-# --- Siapkan Input dari Sidebar ---
-INPUT['row_class'] = '1-3' if INPUT['row_number'] <= 3 else ('4-7' if INPUT['row_number'] <= 7 else '>7')
-INPUT['controll_binned'] = 67 if INPUT['controll_ms'] == 42 else INPUT['controll_ms']
-INPUT['ffe_binned'] = '0' if INPUT['freeface_echelon_ms'] == 0 else ('42-67' if INPUT['freeface_echelon_ms'] <= 67 else '>=109')
+# Peringatan input
+warns = []
+if INPUT['row_number'] > MAX_ROWS:
+    warns.append('Jumlah baris %d di atas batas kalibrasi (maks %d). Prediksi memakai faktor 8–9 baris '
+                 'dan kemungkinan masih terlalu kecil.' % (INPUT['row_number'], MAX_ROWS))
+if INPUT['distance_m'] < MIN_DIST:
+    warns.append('Jarak %.0f m di bawah batas kalibrasi (%d m) — hasil ekstrapolasi.' % (INPUT['distance_m'], MIN_DIST))
+if not (ch_min <= INPUT['charge_kg'] <= ch_max):
+    warns.append('Charge %.0f kg di luar rentang data (%.0f–%.0f kg).' % (INPUT['charge_kg'], ch_min, ch_max))
+if not (df['sd'].min() <= res['sd'] <= df['sd'].max()):
+    warns.append('Scaled distance %.1f di luar rentang data (%.1f–%.1f).' % (res['sd'], df['sd'].min(), df['sd'].max()))
+if INPUT[GEO] not in geos:
+    warns.append("Geologi '%s' belum ada di data." % INPUT[GEO])
+for key, col in [('controll_ms', 'controll_ms'), ('wall_echelon_ms', 'wall_echelon_ms'),
+                 ('freeface_echelon_ms', 'freeface_echelon_ms')]:
+    if float(INPUT[key]) not in set(df[col].astype(float)):
+        warns.append('%s %s ms belum pernah dipakai di data — dipakai level terdekat.' % (NICE.get(col, col), INPUT[key]))
 
-sd = INPUT['distance_m'] / np.sqrt(INPUT['charge_kg'])
-wf_norm = compute_wf(INPUT, cal) / mean_wf
-g_arr = predict_g_mc(cal, sd, wf_norm, sigma_mc, N_ITER)
-g_med = float(np.median(g_arr))
-g_mean = g_med * math.exp(sigma_mc ** 2 / 2.0)     
-g_p10 = float(np.percentile(g_arr, 10))
-g_p90 = float(np.percentile(g_arr, 90))
-g_design = g_med * design_lambda
-prob = 100.0 * float(np.mean(g_arr > G_TARGET))
 
 # =====================================================================
-# [E] TAMPILAN DASHBOARD
+# [G] HEADER
 # =====================================================================
+st.markdown('# 💥 Prediksi Getaran Blasting — Pit 3')
+st.markdown('<span class="muted">Model v5 · atenuasi per geologi · faktor jumlah baris · '
+            'Monte Carlo %s iterasi · %d blast dari %s · batas g = %.2f</span>'
+            % (format(N_ITER, ','), len(df), source, G_TARGET), unsafe_allow_html=True)
 
-st.subheader("📊 RINGKASAN KALIBRASI DATA AKTUAL")
-col1, col2, col3 = st.columns(3)
-col1.metric("Jumlah Data Valid", f"{len(df)} pengukuran")
-col2.metric("MAE LOOCV", f"{mae_loo:.5f} g")
-col3.metric("NMAE", f"{nmae * 100:.1f}%")
+tab_pred, tab_hist, tab_factor, tab_val, tab_data = st.tabs(
+    ['🎯 Prediksi', '📈 Data historis per faktor', '🧭 Faktor pengaruh', '✅ Validasi model', '📋 Data'])
 
-with st.expander("Lihat Detail Regresi Regresi & Parameter Model"):
-    st.text(f"""
-    [REGRESI ln(Amaks) vs ln(SD)]
-    k = {cal['k']:.2f} | n = {cal['n']:.4f} | R2 = {cal['r2']:.4f}
-    sigma in-sample = {cal['sigma']:.4f} | sigma LOOCV = {dl['s_e']:.4f} (MC)
-    MEAN_WF = {mean_wf:.4f} | lambda P{DESIGN_PCT} = {design_lambda:.3f}
-    """)
 
-st.divider()
+# =====================================================================
+# TAB 1 - PREDIKSI
+# =====================================================================
+with tab_pred:
+    cm_design = max_charge(INPUT['distance_m'], INPUT, model, res['lam'])
+    cm_median = max_charge(INPUT['distance_m'], INPUT, model, 1.0)
 
-st.subheader("🎯 HASIL PREDIKSI GETARAN (g)")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kpi('Median g', '%.4f' % res['median'], 'Nilai paling mungkin · rentang P10–P90 %.4f–%.4f'
+            % (res['p10'], res['p90']), g_for_status=res['median'])
+    with c2:
+        kpi('Design value (P%d)' % DESIGN_PCT, '%.4f' % res['design'],
+            'Acuan keputusan geoteknik · median × %.2f' % res['lam'], g_for_status=res['design'])
+    with c3:
+        pc = '#d03b3b' if res['prob'] > 0.5 else ('#fab219' if res['prob'] > 0.1 else '#0ca30c')
+        kpi('Peluang g > %.2f' % G_TARGET, '%.0f%%' % (100 * res['prob']),
+            '%.0f dari 100 peledakan dengan desain ini' % (100 * res['prob']), color=pc)
+    with c4:
+        note = '⚠ di bawah charge terkecil di data' if cm_design < ch_min else 'design value tetap ≤ %.2f' % G_TARGET
+        kpi('Charge maks aman', '%.1f kg' % cm_design,
+            '%s · median ≤ %.2f: %.1f kg' % (note, G_TARGET, cm_median), color=ACCENT)
 
-col_res1, col_res2 = st.columns(2)
-with col_res1:
-    st.markdown(f"""
-    **Parameter Prediksi Utama:**
-    - **Distance:** {INPUT['distance_m']} m
-    - **Charge:** {INPUT['charge_kg']} kg
-    - **Scale Distance (SD):** {sd:.2f}
-    - **WF normalized:** {wf_norm:.3f}
-    """)
-with col_res2:
-    st.markdown(f"""
-    **Hasil Prediksi Numerik:**
-    - **Prediksi Harapan:** `{g_mean:.5f}` ({get_status(g_mean)})
-    - **Median (P50):** `{g_med:.5f}`
-    - **Rentang P10-P90:** `{g_p10:.5f}` - `{g_p90:.5f}`
-    - **Probabilitas > {G_TARGET:.3f}:** `{prob:.1f}%`
-    """)
+    s = status_of(res['design'])
+    if res['design'] <= G_TARGET:
+        msg = 'Desain aman sampai design value — tidak perlu perubahan.'
+    elif res['median'] <= G_TARGET:
+        msg = 'Median masih di bawah batas, tapi design value melewatinya. Perlu mitigasi untuk keputusan geoteknik.'
+    else:
+        msg = 'Median sudah di atas batas. Desain perlu diubah sebelum ditembak.'
+    st.markdown('<div class="banner" style="--c:%s"><b>%s %s</b> — %s</div>'
+                % (s['color'], s['icon'], s['label'], msg), unsafe_allow_html=True)
+    for w in warns:
+        st.warning(w, icon='⚠️')
 
-st.info(f"**DESIGN VALUE (P90) : `{g_design:.5f}` ({get_status(g_design)})**  *(<- Acuan Keputusan)*")
+    left, right = st.columns([1.15, 1])
+    with left:
+        sims = res['sims']
+        hi = float(np.percentile(sims, 99.5))
+        fig = go.Figure(go.Histogram(x=sims[sims <= hi], nbinsx=60, marker_color=PALETTE[0],
+                                     marker_line=dict(color='rgba(255,255,255,0.9)', width=1),
+                                     hovertemplate='g %{x}<br>%{y} simulasi<extra></extra>', name='simulasi'))
+        left_side = G_TARGET <= res['median']
+        for x, lab, dash, ypos, anchor in [
+                (G_TARGET, 'batas %.2f' % G_TARGET, 'dot', 1.0, 'right' if left_side else 'left'),
+                (res['median'], 'median %.4f' % res['median'], 'solid', 0.90, 'left' if left_side else 'right'),
+                (res['design'], 'design %.4f' % res['design'], 'dash', 1.0, 'left')]:
+            fig.add_vline(x=x, line=dict(color=MUTED, width=2, dash=dash))
+            fig.add_annotation(x=x, y=ypos, xref='x', yref='paper', text=' %s ' % lab, showarrow=False,
+                               xanchor=anchor, yanchor='top', font=dict(size=11),
+                               bgcolor='rgba(255,255,255,0.75)')
+        fig.update_xaxes(title='g')
+        fig.update_yaxes(title='jumlah simulasi')
+        show_chart(style_fig(fig, 'Sebaran %s simulasi Monte Carlo' % format(N_ITER, ','), 380, legend=False))
 
-st.divider()
+    with right:
+        st.markdown('##### Kenapa hasilnya segini?')
+        steps = [
+            ('Jarak & charge + geologi %s' % INPUT[GEO], res['g_base'], 'SD %.1f · k=%.0f, n=%.2f'
+             % ((res['sd'],) + _kn(INPUT[GEO], model['base']))),
+            ('× jumlah baris (%s)' % res['row']['row_class'], res['g_base'] * res['f_row'],
+             'faktor ×%.2f' % res['f_row']),
+            ('× faktor operasional → median', res['median'], 'faktor ×%.2f' % res['f_ops']),
+            ('× λ → design value', res['design'], 'faktor ×%.2f' % res['lam']),
+        ]
+        fig = go.Figure()
+        labels = [s_[0] for s_ in steps][::-1]
+        vals = [s_[1] for s_ in steps][::-1]
+        notes = [s_[2] for s_ in steps][::-1]
+        cols = [PALETTE[1]] + [ACCENT] * (len(vals) - 1)   # design value (paling atas) dibedakan
+        fig.add_trace(go.Bar(y=labels, x=vals, orientation='h', marker_color=cols,
+                             text=['%.4f  (%s)' % (v, n_) for v, n_ in zip(vals, notes)],
+                             textposition='outside', cliponaxis=False,
+                             hovertemplate='%{y}<br>g = %{x:.4f}<extra></extra>'))
+        fig.add_vline(x=G_TARGET, line=dict(color=MUTED, width=1.5, dash='dot'),
+                      annotation_text='batas', annotation_position='top')
+        fig.update_xaxes(title='g', range=[0, max(vals) * 1.75])
+        fig.update_layout(bargap=0.35)
+        show_chart(style_fig(fig, None, 300, legend=False))
+        st.markdown('<span class="muted">Dibaca dari atas ke bawah: tiap baris menambahkan satu faktor. '
+                    'Batang tosca = design value, garis titik-titik = batas %.2f.</span>' % G_TARGET,
+                    unsafe_allow_html=True)
 
-# Tampilkan Rekomendasi
-recommend(INPUT, cal, mean_wf, df, G_TARGET, design_lambda)
+    # ---------------- REKOMENDASI
+    st.markdown('### 🛠️ Rekomendasi')
+    if res['design'] <= G_TARGET:
+        st.success('Design value sudah ≤ %.2f. Tidak perlu perubahan desain.' % G_TARGET)
+    else:
+        work = dict(INPUT)
+        changes = []
+        for raw_key, p, to_raw in CONTROLLABLE:
+            if p not in model['rf']:
+                continue
+            rf, cnt = model['rf'][p], model['cnt'][p]
+            cur_val = input_row(work)[p]
+            cur_rf = rf.get(cur_val, 1.0) if p in model['params_cat'] else _nearest(rf, cur_val)
+            ok = [k for k in rf if cnt[k] >= MIN_SAMPLES]
+            if not ok:
+                continue
+            best = min(ok, key=lambda k: rf[k])
+            if rf[best] < cur_rf - 1e-9:
+                new_val = to_raw(best)
+                changes.append((NICE[p], INPUT[raw_key], new_val, cnt[best]))
+                work[raw_key] = new_val
+        r1 = predict_event(work, model, fac)
+        _, n_geo = _kn(INPUT[GEO], model['base'])
+        ch_des = work['charge_kg'] * (G_TARGET / r1['design']) ** (2.0 / n_geo)
+        ch_med = work['charge_kg'] * (G_TARGET / r1['median']) ** (2.0 / n_geo) if r1['median'] > G_TARGET else None
 
-st.divider()
+        a, b = st.columns(2)
+        with a:
+            st.markdown('<div class="step"><b>Langkah 1 — ubah tie-up/delay ke level paling aman</b><br>'
+                        '<span class="muted">Hanya level yang sudah dipakai ≥ %d blast.</span></div>'
+                        % MIN_SAMPLES, unsafe_allow_html=True)
+            if changes:
+                for nm, old, new, n_ in changes:
+                    st.markdown('- **%s**: %s → **%s** &nbsp;<span class="muted">(%d blast)</span>'
+                                % (nm, old, new, n_), unsafe_allow_html=True)
+            else:
+                st.markdown('- Tidak ada perubahan tie-up/delay yang menurunkan g.')
+            st.markdown('Hasil: median **%.4f** · design value **%.4f**' % (r1['median'], r1['design']))
+            if INPUT['row_number'] >= 8:
+                st.info('Round %d baris termasuk kelas 8–9 baris (faktor ×%.2f). Memecah jadi ≤ 7 baris '
+                        'menurunkan g sekitar %.0f%%.'
+                        % (INPUT['row_number'], model['rowf'].get('8-9', 1.0),
+                           100 * (1 - model['rowf'].get('4-7', 1.0) / model['rowf'].get('8-9', 1.0))))
+        with b:
+            st.markdown('<div class="step"><b>Langkah 2 — kurangi charge per delay</b><br>'
+                        '<span class="muted">g ∝ charge^(n/2), n %s = %.2f</span></div>'
+                        % (INPUT[GEO], n_geo), unsafe_allow_html=True)
+            if ch_med is not None:
+                st.markdown('- Agar **median** ≤ %.2f: %.1f → **%.1f kg**' % (G_TARGET, INPUT['charge_kg'], ch_med))
+            else:
+                st.markdown('- Median sudah ≤ %.2f setelah langkah 1.' % G_TARGET)
+            st.markdown('- Agar **design value** ≤ %.2f: %.1f → **%.1f kg**' % (G_TARGET, INPUT['charge_kg'], ch_des))
+            if ch_des < ch_min:
+                st.warning('%.1f kg di bawah charge terkecil di data (%.0f kg) — ekstrapolasi, kurang andal.'
+                           % (ch_des, ch_min))
+            st.caption('Charge lebih kecil menurunkan getaran tapi bisa memperburuk fragmentasi. '
+                       'Alternatif: deck/delay lebih halus, pre-split, atau jadwal ulang terhadap lereng.')
 
-# Menampilkan Grafik
-if SHOW_PLOTS:
-    st.subheader("📈 VISUALISASI MODEL")
-    imp = importance_metrics(cal, INPUT, mean_wf)
-    order = sorted(ALL_PARAMS, key=lambda p: -imp['sobol'][p])
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    # ---------------- SENSITIVITAS & CHARGE MAKS
+    st.markdown('### 📉 Kalau charge diubah')
+    a, b = st.columns([1.2, 1])
+    with a:
+        charges = np.arange(10, 95, 5)
+        meds, dess = [], []
+        for ch in charges:
+            rc = predict_event(dict(INPUT, charge_kg=float(ch)), model, fac)
+            meds.append(rc['median']); dess.append(rc['design'])
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=charges, y=meds, mode='lines+markers', name='median',
+                                 line=dict(color=PALETTE[0], width=2), marker=dict(size=8),
+                                 hovertemplate='%{x} kg<br>median %{y:.4f}<extra></extra>'))
+        fig.add_trace(go.Scatter(x=charges, y=dess, mode='lines+markers', name='design value',
+                                 line=dict(color=PALETTE[1], width=2), marker=dict(size=8, symbol='square'),
+                                 hovertemplate='%{x} kg<br>design %{y:.4f}<extra></extra>'))
+        ref_hline(fig, G_TARGET, 'batas %.2f' % G_TARGET, log_y=False, side='left')
+        fig.add_vline(x=INPUT['charge_kg'], line=dict(color=MUTED, width=1, dash='dash'),
+                      annotation_text='input', annotation_position='top')
+        fig.update_xaxes(title='charge per delay (kg)')
+        fig.update_yaxes(title='g')
+        show_chart(style_fig(fig, 'Jarak %.0f m · %s · desain operasional tetap' % (INPUT['distance_m'], INPUT[GEO]), 380))
+    with b:
+        st.markdown('##### Charge maksimum per delay (kg)')
+        st.markdown('<span class="muted">Desain operasional sama dengan input. Angka kiri: median ≤ %.2f · '
+                    'kanan: design value ≤ %.2f. ⚠ = di bawah charge terkecil di data.</span>'
+                    % (G_TARGET, G_TARGET), unsafe_allow_html=True)
+        rows_ = []
+        for dist in [100, 125, 150, 175, 200, 250, 300, 350, 400, 450]:
+            item = {'Jarak (m)': dist}
+            for g in geos:
+                gi = dict(INPUT, geological_condt=g)
+                lam_g = factor_for(g, fac)['lam']
+                cmed = max_charge(dist, gi, model, 1.0)
+                cdes = max_charge(dist, gi, model, lam_g)
+                item[g] = '%.1f / %.1f%s' % (cmed, cdes, ' ⚠' if cdes < ch_min else '')
+            rows_.append(item)
+        show_table(pd.DataFrame(rows_))
 
-    # Grafik 1: Distribusi MC
-    ax1.hist(g_arr, bins=60, color='#4a7fb5', edgecolor='white', linewidth=0.3)
-    ax1.axvline(G_TARGET, color='#c0392b', lw=2.2, ls='--', label='Ambang ' + format(G_TARGET, '.3f'))
-    ax1.axvline(g_med, color='#1a5276', lw=2, label='Median ' + format(g_med, '.4f'))
-    ax1.axvline(g_design, color='#8e44ad', lw=2, ls=':', label='Design P90 ' + format(g_design, '.4f'))
-    ax1.set_xlabel('Nilai g')
-    ax1.set_ylabel('Frekuensi')
-    ax1.set_title(f'Distribusi Monte Carlo ({N_ITER:,} iterasi)')
-    ax1.legend(fontsize=9)
-    ax1.grid(alpha=0.2)
 
-    # Grafik 2: Tornado Chart (Sobol)
-    vals = [imp['sobol'][p] for p in order]
-    colors = plt.cm.viridis(np.linspace(0.15, 0.9, len(order)))
-    bars = ax2.barh(range(len(order)), vals, color=colors, edgecolor='black', linewidth=0.6)
-    ax2.set_yticks(range(len(order)))
-    ax2.set_yticklabels([NICE[p] for p in order], fontsize=9)
-    ax2.invert_yaxis()
-    ax2.set_xlabel('Kontribusi terhadap varians g - Sobol (%)')
-    ax2.set_title('Kepentingan Faktor')
-    
-    for b, v in zip(bars, vals):
-        ax2.text(v + max(vals) * 0.01, b.get_y() + b.get_height() / 2,
-                 format(v, '.1f') + '%', va='center', fontsize=8, fontweight='bold')
-                 
-    ax2.set_xlim(0, max(vals) * 1.18)
-    ax2.grid(axis='x', alpha=0.3)
+# =====================================================================
+# TAB 2 - DATA HISTORIS PER FAKTOR
+# =====================================================================
+with tab_hist:
+    st.markdown('Setiap titik adalah satu pengukuran blast. Pilih faktor untuk melihat bagaimana '
+                'getaran terukur berbeda menurut level faktor itu.')
+    fac_label = st.selectbox('Faktor', list(HIST_FACTORS.keys()), index=1)
+    col, order = HIST_FACTORS[fac_label]
+    levels = order if order else sorted(df[col].dropna().unique(), key=float)
+    levels = [lv for lv in levels if (df[col] == lv).any()]
+    k_all, n_all = sd_line
+    d = df.copy()
+    d['rasio'] = d['A'] / (k_all * d['sd'] ** (-n_all))
 
-    plt.tight_layout()
-    st.pyplot(fig)
+    def lv_txt(v):
+        return str(int(v)) if isinstance(v, (int, float, np.floating)) and float(v).is_integer() else str(v)
+
+    hover = ('<b>%{customdata[0]}</b><br>jarak %{customdata[1]:.0f} m · charge %{customdata[2]:.0f} kg'
+             '<br>g = %{customdata[3]:.4f} · %{customdata[4]} baris · %{customdata[5]}<extra></extra>')
+
+    a, b = st.columns(2)
+    with a:
+        fig = go.Figure()
+        xs_all = np.linspace(d['sd'].min(), d['sd'].max(), 40)
+        for i, lv in enumerate(levels):
+            x = d[d[col] == lv]
+            colr, sym = PALETTE[i % len(PALETTE)], SYMBOLS[i % len(SYMBOLS)]
+            fig.add_trace(go.Scatter(
+                x=x['sd'], y=x['A'], mode='markers', name='%s (n=%d)' % (lv_txt(lv), len(x)),
+                marker=dict(color=colr, symbol=sym, size=10, line=dict(color='white', width=1)),
+                customdata=np.stack([x['tanggal'], x[COL_DIST], x[COL_CHG], x[COL_G],
+                                     x['row_number'].astype(int), x[GEO]], axis=1),
+                hovertemplate=hover, legendgroup=str(lv)))
+            if len(x) >= MIN_GEO_FOR_OWN_N and x['sd'].nunique() > 2:
+                s_, i_, *_ = stats.linregress(np.log(x['sd']), np.log(x['A']))
+                xs = np.linspace(x['sd'].min(), x['sd'].max(), 30)
+                fig.add_trace(go.Scatter(x=xs, y=np.exp(i_) * xs ** s_, mode='lines', showlegend=False,
+                                         line=dict(color=colr, width=2), legendgroup=str(lv),
+                                         hovertemplate='%s: A = %.0f·SD^-%.2f<extra></extra>'
+                                         % (lv_txt(lv), np.exp(i_), -s_)))
+        ref_hline(fig, G_TARGET * G_GRAV, 'batas g = %.2f' % G_TARGET, log_y=True, side='left')
+        fig.update_xaxes(type='log', title='Scaled distance SD = R/√W')
+        fig.update_yaxes(type='log', title='A maks (mm/s²)')
+        show_chart(style_fig(fig, 'Atenuasi menurut %s' % fac_label.lower(), 460))
+        st.markdown('<span class="muted">Garis tren digambar untuk level dengan ≥ %d blast.</span>'
+                    % MIN_GEO_FOR_OWN_N, unsafe_allow_html=True)
+
+    with b:
+        fig = go.Figure()
+        rng_ = np.random.default_rng(1)
+        summary = []
+        for i, lv in enumerate(levels):
+            x = d[d[col] == lv]
+            colr, sym = PALETTE[i % len(PALETTE)], SYMBOLS[i % len(SYMBOLS)]
+            jitter = i + rng_.uniform(-0.18, 0.18, len(x))
+            fig.add_trace(go.Scatter(
+                x=jitter, y=x['rasio'], mode='markers', showlegend=False,
+                marker=dict(color=colr, symbol=sym, size=10, opacity=0.85, line=dict(color='white', width=1)),
+                customdata=np.stack([x['tanggal'], x[COL_DIST], x[COL_CHG], x[COL_G],
+                                     x['row_number'].astype(int), x[GEO]], axis=1),
+                hovertemplate=hover))
+            med = _gm(x['rasio'])
+            fig.add_trace(go.Scatter(x=[i - 0.32, i + 0.32], y=[med, med], mode='lines', showlegend=False,
+                                     line=dict(color=colr, width=4),
+                                     hovertemplate='%s: rasio rata-rata %.2f<extra></extra>' % (lv_txt(lv), med)))
+            fig.add_annotation(x=i, y=1.0, yref='paper', yanchor='bottom', showarrow=False,
+                               text='n=%d%s' % (len(x), ' · tipis' if len(x) < MIN_SAMPLES else ''),
+                               font=dict(size=11))
+            summary.append(dict(level=lv_txt(lv), n=len(x), ratio=med, g_med=float(x[COL_G].median())))
+        ref_hline(fig, 1.0, 'sesuai perkiraan jarak & charge', log_y=True, side='right')
+        fig.update_xaxes(tickmode='array', tickvals=list(range(len(levels))),
+                         ticktext=[lv_txt(lv) for lv in levels], title=fac_label, showgrid=False)
+        fig.update_yaxes(type='log', title='g aktual ÷ prediksi scaled distance')
+        show_chart(style_fig(fig, 'Lebih / kurang bergetar dari perkiraan jarak & charge', 460, legend=False))
+        st.markdown('<span class="muted">Garis tebal = rata-rata geometrik tiap level. Di atas garis putus '
+                    '= getaran lebih besar dari perkiraan scaled distance saja.</span>', unsafe_allow_html=True)
+
+    tbl = pd.DataFrame([{
+        fac_label: s_['level'], 'Jumlah blast': s_['n'], 'Median g': round(s_['g_med'], 4),
+        'Rasio rata-rata': round(s_['ratio'], 2),
+        'Dibanding perkiraan SD': '%+.0f%%' % (100 * (s_['ratio'] - 1)),
+        'Catatan': 'data tipis (< %d blast)' % MIN_SAMPLES if s_['n'] < MIN_SAMPLES else '',
+    } for s_ in summary])
+    show_table(tbl)
+
+    solid = [s_ for s_ in summary if s_['n'] >= MIN_SAMPLES]
+    if len(solid) >= 2:
+        hi_ = max(solid, key=lambda s_: s_['ratio'])
+        lo_ = min(solid, key=lambda s_: s_['ratio'])
+        st.info('**Ringkasan %s:** blast dengan %s = %s rata-rata **%+.0f%%** dibanding perkiraan jarak & charge, '
+                'sedangkan %s = %s **%+.0f%%**. Selisih keduanya %.0f%%.'
+                % (fac_label.lower(), fac_label.lower(), hi_['level'], 100 * (hi_['ratio'] - 1),
+                   fac_label.lower(), lo_['level'], 100 * (lo_['ratio'] - 1),
+                   100 * (hi_['ratio'] / lo_['ratio'] - 1)))
+    thin_lv = [s_['level'] for s_ in summary if s_['n'] < MIN_SAMPLES]
+    if thin_lv:
+        st.caption('Level dengan data < %d blast (%s) belum cukup untuk disimpulkan.' % (MIN_SAMPLES, ', '.join(thin_lv)))
+
+
+# =====================================================================
+# TAB 3 - FAKTOR PENGARUH
+# =====================================================================
+with tab_factor:
+    st.markdown('Seberapa besar prediksi **untuk desain Anda** berubah kalau satu faktor diganti, '
+                'faktor lain tetap.')
+    row0 = res['row']
+    items = []
+    lv_geo = []
+    for g in geos:
+        r_ = row0.copy(); r_[GEO] = g
+        lv_geo.append((g, predict_median(r_, model)))
+    items.append((NICE[GEO], lv_geo))
+    lv_row = []
+    for c in ROW_CLASSES:
+        if c in model['rowf'] or not ROW_AS_MULTIPLIER:
+            r_ = row0.copy(); r_['row_class'] = c
+            lv_row.append((c, predict_median(r_, model)))
+    items.append((NICE['row_class'], lv_row))
+    for p in [q for q in model['params'] if q != 'row_class']:
+        lv = sorted(model['rf'][p], key=str) if p in model['params_cat'] else sorted(model['rf'][p], key=float)
+        out = []
+        for v in lv:
+            r_ = row0.copy(); r_[p] = v
+            out.append((v, predict_median(r_, model)))
+        items.append((NICE[p], out))
+    items.sort(key=lambda t: -(max(v for _, v in t[1]) - min(v for _, v in t[1])))
+
+    a, b = st.columns([1, 1.25])
+    with a:
+        names = [t[0] for t in items][::-1]
+        spans = [max(v for _, v in t[1]) - min(v for _, v in t[1]) for t in items][::-1]
+        fig = go.Figure(go.Bar(y=names, x=spans, orientation='h', marker_color=PALETTE[0],
+                               text=['±%.4f' % (s_ / 2) for s_ in spans], textposition='outside',
+                               cliponaxis=False, hovertemplate='%{y}<br>rentang g %{x:.4f}<extra></extra>'))
+        fig.update_xaxes(title='rentang median g antar level', range=[0, max(spans) * 1.3])
+        show_chart(style_fig(fig, 'Urutan pengaruh untuk desain ini', 420, legend=False))
+    with b:
+        max_lv = max(len(t[1]) for t in items)
+        z = np.full((len(items), max_lv), np.nan)
+        txt = np.full((len(items), max_lv), '', dtype=object)
+        for i, (nm, lvls) in enumerate(items):
+            p_key = [k for k, v in NICE.items() if v == nm][0]
+            cnts = ({g: int((df[GEO] == g).sum()) for g in geos} if p_key == GEO else
+                    (model['rowc'] if p_key == 'row_class' and ROW_AS_MULTIPLIER else model['cnt'].get(p_key, {})))
+            for j, (v, g_) in enumerate(lvls):
+                z[i, j] = g_
+                n_ = cnts.get(v)
+                mark = '' if n_ is None or n_ >= MIN_SAMPLES else ' ·tipis'
+                is_cur = str(v) == str(row0[p_key]) if isinstance(v, str) else abs(float(v) - float(row0[p_key])) < 1e-9
+                txt[i, j] = '%s%s%s<br>%.4f' % ('▶ ' if is_cur else '', lv_txt(v), mark, g_)
+        zmin, zmax = np.nanmin(z), np.nanmax(z)
+        lo_, hi_ = min(zmin, G_TARGET * 0.98), max(zmax, G_TARGET * 1.02)
+        mid = (G_TARGET - lo_) / (hi_ - lo_)
+        fig = go.Figure(go.Heatmap(
+            z=z, text=txt, texttemplate='%{text}', textfont=dict(size=11), zmin=lo_, zmax=hi_,
+            colorscale=[[0, DIV_LOW], [mid, DIV_MID], [1, DIV_HIGH]], xgap=3, ygap=3,
+            hovertemplate='%{text}<extra></extra>', colorbar=dict(title='median g', thickness=12)))
+        fig.update_yaxes(tickvals=list(range(len(items))), ticktext=[t[0] for t in items],
+                         autorange='reversed', showgrid=False)
+        fig.update_xaxes(showticklabels=False, showgrid=False)
+        show_chart(style_fig(fig, 'Median g tiap level (▶ = desain input)', 420, legend=False))
+        st.markdown('<span class="muted">Hijau tosca = di bawah %.2f · krem = sekitar batas · merah bata = di atas. '
+                    '"tipis" = level dengan data < %d blast.</span>' % (G_TARGET, MIN_SAMPLES),
+                    unsafe_allow_html=True)
+
+    with st.expander('Faktor jumlah baris dan konstanta geologi'):
+        rr_ = [{'Kelas baris': c, 'Faktor': round(model['rowf'][c], 3), 'Jumlah blast': model['rowc'][c]}
+               for c in ROW_CLASSES if c in model['rowf']]
+        if rr_:
+            show_table(pd.DataFrame(rr_))
+        kk = [{'Geologi': g, 'k': round(model['base'][g][0], 0), 'n': round(model['base'][g][1], 3),
+               'R²': round(model['base'][g][2], 3), 'Jumlah blast': model['base'][g][3]} for g in geos]
+        show_table(pd.DataFrame(kk))
+
+
+# =====================================================================
+# TAB 4 - VALIDASI
+# =====================================================================
+with tab_val:
+    st.markdown('Setiap blast diprediksi oleh model yang dikalibrasi **tanpa** blast itu '
+                '(validasi per event). Inilah gambaran akurasi untuk blast yang belum terjadi.')
+    ratio = df[COL_G].values / cv_pred
+    lam_used = np.array([factor_for(g, fac)['lam'] for g in df[GEO]])
+    covered = cv_pred * lam_used >= df[COL_G].values
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kpi('MAE', '%.4f g' % mae, 'rata-rata selisih prediksi vs aktual')
+    with c2:
+        kpi('NMAE', '%.1f%%' % (100 * mae / (df[COL_G].max() - df[COL_G].min())), 'MAE ÷ rentang g data')
+    with c3:
+        kpi('Prediksi kekecilan', '%d / %d' % ((ratio > 1).sum(), len(df)), 'ideal ± separuh')
+    with c4:
+        kpi('Design value menutupi', '%.0f%%' % (100 * covered.mean()),
+            '%d dari %d blast · target %d%%' % (covered.sum(), len(df), DESIGN_PCT))
+
+    a, b = st.columns([1.2, 1])
+    with a:
+        hi = float(max(df[COL_G].max(), cv_pred.max()) * 1.1)
+        lam = fac['*']['lam']
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=[0, hi], y=[0, hi], mode='lines', name='tepat (1:1)',
+                                 line=dict(color=MUTED, width=1.5), hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=[0, hi / lam], y=[0, hi], mode='lines', name='design value (×%.2f)' % lam,
+                                 line=dict(color=MUTED, width=1.5, dash='dash'), hoverinfo='skip'))
+        for g in geos:
+            x = df[df[GEO] == g]
+            pv = cv_pred[df[GEO].values == g]
+            fig.add_trace(go.Scatter(
+                x=pv, y=x[COL_G], mode='markers', name='%s (n=%d)' % (g, len(x)),
+                marker=dict(color=GEO_COLOR.get(g, PALETTE[3]), symbol=GEO_SYMBOL.get(g, 'diamond'),
+                            size=10, line=dict(color='white', width=1)),
+                customdata=np.stack([x['tanggal'], x[COL_DIST], x[COL_CHG], x['row_number'].astype(int)], axis=1),
+                hovertemplate='<b>%{customdata[0]}</b> · %{customdata[1]:.0f} m · %{customdata[2]:.0f} kg · '
+                              '%{customdata[3]} baris<br>prediksi %{x:.4f} · aktual %{y:.4f}<extra></extra>'))
+        fig.update_xaxes(title='prediksi g (median)', range=[0, hi])
+        fig.update_yaxes(title='g terukur', range=[0, hi])
+        show_chart(style_fig(fig, 'Prediksi vs aktual', 480))
+    with b:
+        st.markdown('##### Keseimbangan prediksi')
+        st.markdown('<span class="muted">Rasio aktual ÷ prediksi. 1,00 = tepat · > 1 = model kekecilan · '
+                    '< 1 = model kebesaran.</span>', unsafe_allow_html=True)
+        bias = [{'Kelompok': 'Geologi: %s' % g, 'Blast': int((df[GEO] == g).sum()),
+                 'Rasio median': round(float(np.median(ratio[df[GEO].values == g])), 2),
+                 'MAE': round(float(np.mean(np.abs(df[COL_G].values - cv_pred)[df[GEO].values == g])), 4)}
+                for g in geos]
+        bias += [{'Kelompok': 'Baris: %s' % c, 'Blast': int((df['row_class'] == c).sum()),
+                  'Rasio median': round(float(np.median(ratio[df['row_class'].values == c])), 2),
+                  'MAE': round(float(np.mean(np.abs(df[COL_G].values - cv_pred)[df['row_class'].values == c])), 4)}
+                 for c in ROW_CLASSES if (df['row_class'] == c).any()]
+        bias.append({'Kelompok': 'Semua', 'Blast': len(df), 'Rasio median': round(float(np.median(ratio)), 2),
+                     'MAE': round(mae, 4)})
+        show_table(pd.DataFrame(bias))
+        st.markdown('##### Konstanta model')
+        show_table(pd.DataFrame([
+            {'Parameter': 'λ design value (P%d)' % DESIGN_PCT, 'Nilai': '%.3f' % fac['*']['lam']},
+            {'Parameter': 'σ Monte Carlo', 'Nilai': '%.3f' % fac['*']['sigma']},
+            {'Parameter': 'Mode λ', 'Nilai': 'per geologi' if LAMBDA_PER_GEOLOGI else 'tunggal'},
+            {'Parameter': 'Jumlah baris', 'Nilai': 'pengali langsung' if ROW_AS_MULTIPLIER else 'dalam weighting factor'},
+        ]))
+
+
+# =====================================================================
+# TAB 5 - DATA
+# =====================================================================
+with tab_data:
+    cols_show = ['tanggal', COL_DIST, COL_CHG, 'sd', 'row_number', GEO, 'tie_up_type', 'controll_ms',
+                 'wall_echelon_ms', 'freeface_echelon_ms', 'freeface_count', 'measuring_elevation', COL_G]
+    out = df[cols_show].copy()
+    out['prediksi (validasi)'] = np.round(cv_pred, 4)
+    out['sd'] = out['sd'].round(1)
+    out[COL_G] = out[COL_G].round(4)
+    st.markdown('#### %d blast dipakai untuk kalibrasi' % len(out))
+    show_table(out)
+    st.download_button('⬇️ Unduh CSV', out.to_csv(index=False).encode('utf-8'),
+                       file_name='pit3_data_kalibrasi.csv', mime='text/csv')
+    if len(excluded):
+        st.markdown('#### %d baris tidak dipakai' % len(excluded))
+        ex_cols = [c for c in ['tanggal', COL_DIST, COL_CHG, 'row_number', GEO, COL_G, 'alasan'] if c in excluded.columns]
+        show_table(excluded[ex_cols])
