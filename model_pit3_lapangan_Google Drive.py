@@ -18,6 +18,7 @@
 import io
 import os
 import math
+import re
 
 import numpy as np
 import pandas as pd
@@ -446,6 +447,185 @@ def max_charge(distance, inp, m, factor):
 
 
 # =====================================================================
+# [D2] KOORDINAT - baca berbagai format -> UTM 48S
+# =====================================================================
+# Format: Lat/Lon desimal, desimal + arah, DMS, derajat-menit desimal,
+#         Easting-Northing, MGRS, UTM dengan zona.
+UTM_ZONE = 48  # zona kerja (UTM 48 Selatan, WGS84)
+ZONE = UTM_ZONE
+
+# ---------------------------------------------------------------- lat/lon -> UTM (WGS84)
+_A = 6378137.0
+_F = 1 / 298.257223563
+_K0 = 0.9996
+_E2 = _F * (2 - _F)
+_EP2 = _E2 / (1 - _E2)
+
+
+def latlon_to_utm(lat, lon, zone=ZONE):
+    """Transverse Mercator (rumus Snyder), akurat ~mm di dalam zona."""
+    lon0 = math.radians((zone - 1) * 6 - 180 + 3)
+    phi, lam = math.radians(lat), math.radians(lon)
+    n = _A / math.sqrt(1 - _E2 * math.sin(phi) ** 2)
+    t = math.tan(phi) ** 2
+    c = _EP2 * math.cos(phi) ** 2
+    a = math.cos(phi) * (lam - lon0)
+    m = _A * ((1 - _E2 / 4 - 3 * _E2 ** 2 / 64 - 5 * _E2 ** 3 / 256) * phi
+              - (3 * _E2 / 8 + 3 * _E2 ** 2 / 32 + 45 * _E2 ** 3 / 1024) * math.sin(2 * phi)
+              + (15 * _E2 ** 2 / 256 + 45 * _E2 ** 3 / 1024) * math.sin(4 * phi)
+              - (35 * _E2 ** 3 / 3072) * math.sin(6 * phi))
+    x = _K0 * n * (a + (1 - t + c) * a ** 3 / 6 + (5 - 18 * t + t ** 2 + 72 * c - 58 * _EP2) * a ** 5 / 120)
+    y = _K0 * (m + n * math.tan(phi) * (a ** 2 / 2 + (5 - t + 9 * c + 4 * c ** 2) * a ** 4 / 24
+                                        + (61 - 58 * t + t ** 2 + 600 * c - 330 * _EP2) * a ** 6 / 720))
+    easting = x + 500000.0
+    northing = y + (10000000.0 if lat < 0 else 0.0)
+    return easting, northing
+
+
+# ---------------------------------------------------------------- MGRS -> UTM
+_BANDS = 'CDEFGHJKLMNPQRSTUVWX'
+_ROW_LETTERS = 'ABCDEFGHJKLMNPQRSTUV'
+
+
+def mgrs_to_utm(zone, band, square, e_str, n_str):
+    e_str, n_str = e_str.strip(), n_str.strip()
+    if len(e_str) != len(n_str) or not 1 <= len(e_str) <= 5:
+        raise ValueError('angka easting & northing MGRS harus sama panjang (1–5 digit)')
+    scale = 10 ** (5 - len(e_str))
+    e_in, n_in = int(e_str) * scale, int(n_str) * scale
+    zone = int(zone)
+    band, col, row = band.upper(), square[0].upper(), square[1].upper()
+    s = zone % 6 or 6
+    cols = {1: 'ABCDEFGH', 2: 'JKLMNPQR', 3: 'STUVWXYZ', 4: 'ABCDEFGH', 5: 'JKLMNPQR', 6: 'STUVWXYZ'}[s]
+    if col not in cols:
+        raise ValueError("huruf kolom MGRS '%s' tidak cocok untuk zona %d" % (col, zone))
+    easting = (cols.index(col) + 1) * 100000 + e_in
+    if row not in _ROW_LETTERS:
+        raise ValueError("huruf baris MGRS '%s' tidak dikenal" % row)
+    offset = 5 if zone % 2 == 0 else 0
+    n100k = ((_ROW_LETTERS.index(row) - offset) % 20) * 100000 + n_in
+    if band not in _BANDS:
+        raise ValueError("lintang band MGRS '%s' tidak dikenal" % band)
+    lat_band_min = -80 + 8 * _BANDS.index(band)
+    lon_cm = (zone - 1) * 6 - 180 + 3
+    _, n_min = latlon_to_utm(lat_band_min, lon_cm, zone)
+    if lat_band_min < 0 and n_min >= 10000000:   # tepat di ekuator
+        n_min -= 10000000
+    northing = n100k
+    while northing < n_min - 100000:
+        northing += 2000000
+    return float(easting), float(northing)
+
+
+# ---------------------------------------------------------------- parser umum
+FORMATS = {
+    'auto': ('Otomatis (deteksi format)', '-3.753802, 103.864167  atau  373871, 9585004'),
+    'dec': ('Lat, Lon desimal', '-3.753802, 103.864167'),
+    'dec_h': ('Lat, Lon desimal + arah (S/E)', '3.753802 S, 103.864167 E'),
+    'dms': ("Derajat-menit-detik (DMS)", '3°45\'13.7" S, 103°51\'51.0" E'),
+    'ddm': ('Derajat-menit desimal', "3°45.228' S, 103°51.850' E"),
+    'en': ('Easting, Northing (UTM 48S)', '373871, 9585004'),
+    'mgrs': ('MGRS', '48M UA 73871 85004'),
+    'utm': ('UTM dengan zona', '48 S 373871 E 9585004 N'),
+}
+
+_NUM = r'[+-]?\d+(?:[.,]\d+)?'
+_ANGLE = re.compile(r'^\s*(?P<h1>[NSEW])?\s*(?P<d>[+-]?\d+(?:\.\d+)?)\s*(?:°|º|d|\s)?\s*'
+                    r'(?:(?P<m>\d+(?:\.\d+)?)\s*(?:\'|′|m)\s*)?'
+                    r'(?:(?P<s>\d+(?:\.\d+)?)\s*(?:"|″|\'\'|s)\s*)?(?P<h2>[NSEW])?\s*$')
+
+
+def _clean(text):
+    t = str(text).strip().upper()
+    for a, b in [('’', "'"), ('‘', "'"), ('`', "'"), ('“', '"'), ('”', '"'), ('″', '"'), ('′', "'"),
+                 ('º', '°'), (';', ',')]:
+        t = t.replace(a, b)
+    return re.sub(r'\s+', ' ', t)
+
+
+def _parse_angle(part):
+    m = _ANGLE.match(part)
+    if not m:
+        raise ValueError("bagian '%s' tidak terbaca" % part.strip())
+    deg = float(m.group('d'))
+    mins = float(m.group('m')) if m.group('m') else 0.0
+    secs = float(m.group('s')) if m.group('s') else 0.0
+    if mins >= 60 or secs >= 60:
+        raise ValueError('menit/detik harus < 60')
+    val = abs(deg) + mins / 60 + secs / 3600
+    if deg < 0 or str(m.group('d')).startswith('-'):
+        val = -val
+    hemi = m.group('h1') or m.group('h2')
+    if hemi in ('S', 'W'):
+        val = -abs(val)
+    elif hemi in ('N', 'E'):
+        val = abs(val)
+    kind = 'dms' if m.group('s') else ('ddm' if m.group('m') else ('dec_h' if hemi else 'dec'))
+    return val, hemi, kind
+
+
+def parse_coord(text, fmt='auto', zone=ZONE):
+    """Return dict(e, n, kind, desc). Raise ValueError bila tidak terbaca."""
+    if text is None or not str(text).strip():
+        raise ValueError('kosong')
+    t = _clean(text)
+
+    # MGRS: 48M UA 73871 85004  atau 48MUA7387185004
+    m = re.match(r'^(\d{1,2})\s*([C-HJ-NP-X])\s*([A-HJ-NP-Z]{2})\s*(\d+)\s+(\d+)$', t) or \
+        re.match(r'^(\d{1,2})([C-HJ-NP-X])([A-HJ-NP-Z]{2})(\d{2,10})$', t)
+    if m:
+        if len(m.groups()) == 4:
+            digits = m.group(4)
+            if len(digits) % 2:
+                raise ValueError('digit MGRS harus genap')
+            e_s, n_s = digits[:len(digits) // 2], digits[len(digits) // 2:]
+        else:
+            e_s, n_s = m.group(4), m.group(5)
+        if int(m.group(1)) != zone:
+            raise ValueError('zona %s berbeda dengan zona kerja %d' % (m.group(1), zone))
+        e, n = mgrs_to_utm(m.group(1), m.group(2), m.group(3), e_s, n_s)
+        return _result(e, n, 'mgrs', fmt)
+
+    # UTM dengan zona: 48 373871 E 9585004 S | 48 S 373871 E 9585004 N | 48M 373871 E 9585004 N
+    m = re.match(r'^(\d{1,2})\s*([A-Z])?\s+(\d+(?:\.\d+)?)\s*(?:E|MT)?\s*,?\s+(\d+(?:\.\d+)?)\s*(?:[NS]|MU)?$', t)
+    if m and float(m.group(3)) > 1000:
+        if int(m.group(1)) != zone:
+            raise ValueError('zona %s berbeda dengan zona kerja %d' % (m.group(1), zone))
+        return _result(float(m.group(3)), float(m.group(4)), 'utm', fmt)
+
+    # dua bagian: pisah koma; kalau tidak ada koma, coba pisah spasi untuk angka polos
+    parts = [p for p in t.split(',') if p.strip()]
+    if len(parts) != 2:
+        nums = re.findall(r'^\s*([+-]?\d+(?:\.\d+)?)\s+([+-]?\d+(?:\.\d+)?)\s*$', t)
+        if nums:
+            parts = list(nums[0])
+        else:
+            raise ValueError('pisahkan dua nilai dengan koma, contoh: %s' % FORMATS.get(fmt, FORMATS['auto'])[1])
+
+    plain = [re.match(r'^\s*[+-]?\d+(?:\.\d+)?\s*$', p) for p in parts]
+    if all(plain) and all(abs(float(p)) > 1000 for p in parts):
+        e, n = float(parts[0]), float(parts[1])
+        if n < e:   # tertukar (Northing, Easting)
+            e, n = n, e
+        return _result(e, n, 'en', fmt)
+
+    (lat, h1, k1), (lon, h2, k2) = _parse_angle(parts[0]), _parse_angle(parts[1])
+    if h1 in ('E', 'W') or h2 in ('N', 'S'):     # ditulis Lon, Lat
+        lat, lon = lon, lat
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError('lintang/bujur di luar rentang')
+    kind = k1 if k1 == k2 else max(k1, k2, key=lambda k: ['dec', 'dec_h', 'ddm', 'dms'].index(k))
+    e, n = latlon_to_utm(lat, lon, zone)
+    return _result(e, n, kind, fmt, lat=lat, lon=lon)
+
+
+def _result(e, n, kind, fmt, lat=None, lon=None):
+    if fmt not in ('auto', kind):
+        raise ValueError("terbaca sebagai '%s', bukan '%s'" % (FORMATS[kind][0], FORMATS[fmt][0]))
+    return dict(e=e, n=n, kind=kind, desc=FORMATS[kind][0], lat=lat, lon=lon)
+
+
+# =====================================================================
 # [E] SIDEBAR
 # =====================================================================
 st.sidebar.markdown('## 📂 Sumber data')
@@ -466,9 +646,14 @@ else:
 data_status = st.sidebar.container()
 st.sidebar.divider()
 
+ELEV_OPTIONS = ['lower', 'normal', 'higher']
+st.session_state.setdefault('in_distance', 255.0)
+st.session_state.setdefault('in_elev', 'higher')
+
 st.sidebar.markdown('## ⚙️ Rencana peledakan')
 INPUT = {
-    'distance_m': st.sidebar.number_input('Jarak ke titik ukur (m)', min_value=1.0, value=255.0, step=5.0),
+    'distance_m': st.sidebar.number_input('Jarak ke titik ukur (m)', min_value=1.0, step=5.0, key='in_distance',
+                                          help='Isi manual, atau hitung dari koordinat di tab 📍 Jarak & sketsa.'),
     'charge_kg': st.sidebar.number_input('Charge per delay (kg)', min_value=1.0, value=30.0, step=1.0),
     'row_number': int(st.sidebar.number_input('Jumlah baris', min_value=1, max_value=15, value=5, step=1)),
     'geological_condt': st.sidebar.selectbox('Geologi', ['Fault', 'coal', 'normal'], index=0),
@@ -480,7 +665,7 @@ INPUT['wall_echelon_ms'] = st.sidebar.selectbox('Wall echelon (ms)', DELAY_OPTIO
 INPUT['freeface_echelon_ms'] = st.sidebar.selectbox('Freeface echelon (ms)', DELAY_OPTIONS, index=0)
 INPUT['freeface_count'] = st.sidebar.selectbox('Freeface count', [1, 2, 3], index=1,
                                                help='1 = atas saja · 2 = atas + depan · 3 = atas + depan + samping')
-INPUT['measuring_elevation'] = st.sidebar.selectbox('Elevasi titik ukur', ['lower', 'normal', 'higher'], index=2)
+INPUT['measuring_elevation'] = st.sidebar.selectbox('Elevasi titik ukur', ELEV_OPTIONS, key='in_elev')
 
 
 
@@ -562,8 +747,8 @@ st.markdown('<span class="muted">Model v5 · atenuasi per geologi · faktor juml
             'Monte Carlo %s iterasi · %d blast dari %s · batas g = %.2f</span>'
             % (format(N_ITER, ','), len(df), source, G_TARGET), unsafe_allow_html=True)
 
-tab_pred, tab_hist, tab_factor, tab_val, tab_data = st.tabs(
-    ['🎯 Prediksi', '📈 Data historis per faktor', '🧭 Faktor pengaruh', '✅ Validasi model', '📋 Data'])
+tab_pred, tab_dist, tab_hist, tab_factor, tab_val = st.tabs(
+    ['🎯 Prediksi', '📍 Jarak & sketsa', '📈 Data historis per faktor', '🧭 Faktor pengaruh', '✅ Validasi model'])
 
 
 # =====================================================================
@@ -745,6 +930,206 @@ with tab_pred:
                 item[g] = '%.1f / %.1f%s' % (cmed, cdes, ' ⚠' if cdes < ch_min else '')
             rows_.append(item)
         show_table(pd.DataFrame(rows_))
+
+
+# =====================================================================
+# TAB - JARAK & SKETSA (opsional; prediksi tetap jalan tanpa ini)
+# =====================================================================
+def _set_from_calc(dist, elev):
+    """Callback tombol: isi jarak & elevasi di sidebar."""
+    st.session_state['in_distance'] = float(round(dist, 1))
+    st.session_state['in_elev'] = elev
+
+
+def _seg_dist(px, py, ax, ay, bx, by):
+    """Jarak titik P ke ruas AB."""
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    qx, qy = ax + t * dx, ay + t * dy
+    return math.hypot(px - qx, py - qy), qx, qy
+
+
+def _nice_len(span):
+    for v in [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000]:
+        if v >= span / 6:
+            return v
+    return 5000
+
+
+FMT_KEYS = list(FORMATS.keys())
+
+with tab_dist:
+    st.markdown('Hitung **jarak horizontal** dari sudut blok peledakan ke alat ukur, sebelum data diolah '
+                'di Blastware. Bagian ini opsional — kalau dikosongkan, prediksi tetap memakai jarak '
+                'yang diisi manual di sidebar.')
+
+    colA, colB = st.columns([1.15, 1])
+    with colA:
+        st.markdown('##### 💥 Lokasi blasting — sudut blok')
+        fmt_b = st.selectbox('Format koordinat blasting', FMT_KEYS, key='fmt_blast',
+                             format_func=lambda k: FORMATS[k][0])
+        st.caption('Contoh: `%s`' % FORMATS[fmt_b][1])
+        n_corner = int(st.number_input('Jumlah sudut blok', min_value=1, max_value=12, value=4, step=1,
+                                       key='n_corner'))
+        corner_txt = []
+        cc = st.columns(2)
+        for i in range(n_corner):
+            with cc[i % 2]:
+                corner_txt.append(('S%d' % (i + 1),
+                                   st.text_input('Sudut S%d' % (i + 1), key='corner_%d' % i,
+                                                 placeholder=FORMATS[fmt_b][1])))
+    with colB:
+        st.markdown('##### 📟 Alat ukur')
+        fmt_i = st.selectbox('Format koordinat alat ukur', FMT_KEYS, key='fmt_inst',
+                             format_func=lambda k: FORMATS[k][0])
+        inst_txt = st.text_input('Koordinat alat ukur', key='inst_coord', placeholder=FORMATS[fmt_i][1])
+        c1_, c2_ = st.columns(2)
+        with c1_:
+            inst_id = st.text_input('ID alat (opsional)', key='inst_id', placeholder='mis. UM16793')
+        with c2_:
+            blast_date = st.date_input('Tanggal blasting', key='blast_date', format='DD/MM/YYYY')
+
+    # ---------------- baca koordinat
+    corners, problems = [], []
+    for name, txt in corner_txt:
+        txt = (txt or '').strip()
+        if not txt:
+            continue
+        try:
+            p = parse_coord(txt, fmt_b)
+            corners.append(dict(name=name, e=p['e'], n=p['n'], kind=p['desc']))
+        except ValueError as e:
+            problems.append('%s: %s' % (name, e))
+    inst = None
+    if inst_txt.strip():
+        try:
+            inst = parse_coord(inst_txt, fmt_i)
+        except ValueError as e:
+            problems.append('Alat ukur: %s' % e)
+
+    for p_ in problems:
+        st.warning(p_, icon='⚠️')
+
+    if inst is None or not corners:
+        need = []
+        if not corners:
+            need.append('minimal satu koordinat sudut blok')
+        if inst is None:
+            need.append('koordinat alat ukur')
+        st.info('Isi %s untuk menghitung jarak. Semua titik diubah ke UTM zona %dS (WGS84), '
+                'jadi format blasting dan alat ukur boleh berbeda.' % (' dan '.join(need), UTM_ZONE), icon='📍')
+    else:
+        for c in corners:
+            c['d'] = math.hypot(c['e'] - inst['e'], c['n'] - inst['n'])
+        nearest = min(corners, key=lambda c: c['d'])
+        names = [c['name'] for c in corners]
+
+        st.divider()
+        a, b = st.columns([1, 1.6])
+        with a:
+            st.markdown('##### Jarak tiap sudut ke alat ukur')
+            show_table(pd.DataFrame([{
+                'Titik': c['name'], 'Easting': round(c['e'], 1), 'Northing': round(c['n'], 1),
+                'Jarak horizontal (m)': round(c['d'], 1),
+                'Catatan': 'terdekat' if c is nearest else ''} for c in corners]))
+            pick = st.selectbox('Sudut yang dipakai', names, index=names.index(nearest['name']),
+                                format_func=lambda nm: '%s — %.1f m%s' % (
+                                    nm, next(c['d'] for c in corners if c['name'] == nm),
+                                    '  (terdekat)' if nm == nearest['name'] else ''))
+            chosen = next(c for c in corners if c['name'] == pick)
+            elev = st.radio('Elevasi alat ukur terhadap lokasi blasting', ELEV_OPTIONS, horizontal=True,
+                            index=ELEV_OPTIONS.index(st.session_state.get('in_elev', 'higher')),
+                            key='calc_elev')
+            sd_val = chosen['d'] / math.sqrt(INPUT['charge_kg'])
+            m1, m2 = st.columns(2)
+            with m1:
+                kpi('Jarak horizontal', '%.1f m' % chosen['d'], 'ke %s' % chosen['name'])
+            with m2:
+                kpi('Scaled distance', '%.1f' % sd_val, 'charge %.0f kg/delay (sidebar)' % INPUT['charge_kg'])
+
+            # tepi blok bisa lebih dekat dari sudut
+            if len(corners) >= 2:
+                ring = corners + ([corners[0]] if len(corners) >= 3 else [])
+                edge = min((_seg_dist(inst['e'], inst['n'], p1['e'], p1['n'], p2['e'], p2['n'])
+                            for p1, p2 in zip(ring[:-1], ring[1:])), key=lambda t: t[0])
+                if nearest['d'] - edge[0] > 5:
+                    st.caption('Catatan: tepi blok terdekat berjarak %.1f m dari alat ukur — %.1f m lebih dekat '
+                               'dari sudut terdekat. Kalau ada lubang di sepanjang tepi itu, jarak sebenarnya '
+                               'bisa lebih pendek.' % (edge[0], nearest['d'] - edge[0]))
+
+            st.button('➡️ Pakai jarak & elevasi ini untuk prediksi', type='primary',
+                      on_click=_set_from_calc, args=(chosen['d'], elev))
+            if abs(st.session_state.get('in_distance', 0) - round(chosen['d'], 1)) < 0.05 and \
+                    st.session_state.get('in_elev') == elev:
+                st.success('Sudah dipakai di tab Prediksi: %.1f m, %s.' % (chosen['d'], elev), icon='✅')
+
+            row = pd.DataFrame([{
+                'tanggal': blast_date.strftime('%d/%m/%Y') if blast_date else '',
+                'id_alat': inst_id, 'alat_easting': round(inst['e'], 1), 'alat_northing': round(inst['n'], 1),
+                'titik_blast': chosen['name'], 'blast_easting': round(chosen['e'], 1),
+                'blast_northing': round(chosen['n'], 1), 'distance_m': round(chosen['d'], 1),
+                'charge_kg': INPUT['charge_kg'], 'scale_distance': round(sd_val, 2),
+                'measuring_elevation': elev, 'zona_utm': '%dS' % UTM_ZONE,
+            }])
+            st.download_button('⬇️ Unduh baris untuk data master (CSV)', row.to_csv(index=False).encode('utf-8'),
+                               file_name='jarak_%s.csv' % (blast_date.strftime('%Y%m%d') if blast_date else 'blast'),
+                               mime='text/csv')
+
+        with b:
+            fig = go.Figure()
+            xs = [c['e'] for c in corners]
+            ys = [c['n'] for c in corners]
+            if len(corners) >= 3:
+                fig.add_trace(go.Scatter(x=xs + [xs[0]], y=ys + [ys[0]], mode='lines', fill='toself',
+                                         fillcolor='rgba(194,124,14,0.16)', line=dict(color=ACCENT, width=2),
+                                         name='blok blasting', hoverinfo='skip'))
+            elif len(corners) == 2:
+                fig.add_trace(go.Scatter(x=xs, y=ys, mode='lines', line=dict(color=ACCENT, width=2),
+                                         name='blok blasting', hoverinfo='skip'))
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, mode='markers+text', name='sudut blok', text=[c['name'] for c in corners],
+                textposition='top center', textfont=dict(size=12),
+                marker=dict(color=ACCENT, size=11, symbol='square', line=dict(color='white', width=1.5)),
+                customdata=[[c['name'], c['d']] for c in corners],
+                hovertemplate='<b>%{customdata[0]}</b><br>E %{x:,.1f}<br>N %{y:,.1f}'
+                              '<br>jarak %{customdata[1]:.1f} m<extra></extra>'))
+            fig.add_trace(go.Scatter(
+                x=[chosen['e']], y=[chosen['n']], mode='markers', name='sudut dipakai', hoverinfo='skip',
+                marker=dict(color='rgba(0,0,0,0)', size=22, line=dict(color=ACCENT, width=3))))
+            fig.add_trace(go.Scatter(
+                x=[inst['e']], y=[inst['n']], mode='markers+text', name='alat ukur',
+                text=['Alat ukur' + (' ' + inst_id if inst_id else '')], textposition='bottom center',
+                marker=dict(color=PALETTE[1], size=16, symbol='triangle-up', line=dict(color='white', width=1.5)),
+                hovertemplate='<b>Alat ukur</b><br>E %{x:,.1f}<br>N %{y:,.1f}<extra></extra>'))
+            fig.add_trace(go.Scatter(
+                x=[inst['e'], chosen['e']], y=[inst['n'], chosen['n']], mode='lines', showlegend=False,
+                line=dict(color='rgba(60,60,60,0.85)', width=2, dash='dash'), hoverinfo='skip'))
+            fig.add_annotation(x=(inst['e'] + chosen['e']) / 2, y=(inst['n'] + chosen['n']) / 2,
+                               text='<b>%.1f m</b>' % chosen['d'], showarrow=False, font=dict(size=13),
+                               bgcolor='rgba(255,255,255,0.9)', bordercolor='rgba(60,60,60,0.5)', borderpad=3)
+
+            allx, ally = xs + [inst['e']], ys + [inst['n']]
+            span = max(max(allx) - min(allx), max(ally) - min(ally), 40.0)
+            cx, cy = (max(allx) + min(allx)) / 2, (max(ally) + min(ally)) / 2
+            half = span * 0.62
+            x0, x1, y0, y1 = cx - half, cx + half, cy - half, cy + half
+            # skala
+            L = _nice_len(2 * half)
+            sx, sy = x0 + 0.06 * 2 * half, y0 + 0.06 * 2 * half
+            fig.add_shape(type='line', x0=sx, x1=sx + L, y0=sy, y1=sy, line=dict(color='rgba(40,40,40,0.9)', width=4))
+            fig.add_annotation(x=sx + L / 2, y=sy, yshift=12, text='%d m' % L, showarrow=False, font=dict(size=11))
+            # panah utara
+            fig.add_annotation(x=0.95, y=0.93, ax=0.95, ay=0.78, xref='x domain', yref='y domain',
+                               axref='x domain', ayref='y domain', showarrow=True, arrowhead=2, arrowsize=1.4,
+                               arrowwidth=2.5, arrowcolor='rgba(40,40,40,0.9)', text='')
+            fig.add_annotation(x=0.95, y=0.94, xref='x domain', yref='y domain', text='<b>U</b>',
+                               showarrow=False, yanchor='bottom', font=dict(size=13))
+            fig.update_xaxes(range=[x0, x1], title='Easting (m) — UTM %dS' % UTM_ZONE, tickformat=',d')
+            fig.update_yaxes(range=[y0, y1], title='Northing (m)', tickformat=',d', scaleanchor='x', scaleratio=1)
+            show_chart(style_fig(fig, 'Sketsa lokasi — %s · %s' % (
+                blast_date.strftime('%d/%m/%Y') if blast_date else '', elev), 560))
+            st.caption('Ikon kamera di pojok kanan atas grafik untuk menyimpan sketsa sebagai gambar PNG.')
 
 
 # =====================================================================
@@ -986,23 +1371,3 @@ with tab_val:
             {'Parameter': 'Mode λ', 'Nilai': 'per geologi' if LAMBDA_PER_GEOLOGI else 'tunggal'},
             {'Parameter': 'Jumlah baris', 'Nilai': 'pengali langsung' if ROW_AS_MULTIPLIER else 'dalam weighting factor'},
         ]))
-
-
-# =====================================================================
-# TAB 5 - DATA
-# =====================================================================
-with tab_data:
-    cols_show = ['tanggal', COL_DIST, COL_CHG, 'sd', 'row_number', GEO, 'tie_up_type', 'controll_ms',
-                 'wall_echelon_ms', 'freeface_echelon_ms', 'freeface_count', 'measuring_elevation', COL_G]
-    out = df[cols_show].copy()
-    out['prediksi (validasi)'] = np.round(cv_pred, 4)
-    out['sd'] = out['sd'].round(1)
-    out[COL_G] = out[COL_G].round(4)
-    st.markdown('#### %d blast dipakai untuk kalibrasi' % len(out))
-    show_table(out)
-    st.download_button('⬇️ Unduh CSV', out.to_csv(index=False).encode('utf-8'),
-                       file_name='pit3_data_kalibrasi.csv', mime='text/csv')
-    if len(excluded):
-        st.markdown('#### %d baris tidak dipakai' % len(excluded))
-        ex_cols = [c for c in ['tanggal', COL_DIST, COL_CHG, 'row_number', GEO, COL_G, 'alasan'] if c in excluded.columns]
-        show_table(excluded[ex_cols])
